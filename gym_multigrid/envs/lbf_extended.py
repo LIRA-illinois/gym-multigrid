@@ -1603,15 +1603,15 @@ class LBFExtendedEnv(MultiGridEnv):
         return agent_fruit_obs_mask
 
     def _transform_to_neighborhood_original(
-        self, center: tuple[int, int], sight: int, pos: tuple[int, int]
+        self, origin: tuple[int, int], sight: int, pos: tuple[int, int]
     ) -> tuple[int, int]:
         """
         # this matches the original lbf's implementation, but
         # I don't get the min(sight, center) thing
         """
         return (
-            pos[0] - center[0] + min(sight, center[0]),
-            pos[1] - center[1] + min(sight, center[1]),
+            pos[0] - origin[0] + min(sight, origin[0]),
+            pos[1] - origin[1] + min(sight, origin[1]),
         )
 
     def _get_first_hit_time_obs(self, agent_idx: int):
