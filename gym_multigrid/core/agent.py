@@ -557,14 +557,14 @@ class LBFAgent(Agent):
         self.level = level
 
         self.reward: float = 0.0
-        self.t_first_goal_hit: int = -1
+        self.t_first_hit_goal: int = -1
         self.neighbor_pos_offsets: NDArray[np.int_] = np.array(
             [[-1, 0], [1, 0], [0, -1], [0, 1]]
         )
         self.neighbor_pos: NDArray[np.int_] = np.zeros((4, 2), dtype=np.int_)
 
         # an agent may have multiple current goal states
-        self.room_goals: dict[int, NDArray] = {}
+        self.task_goals: dict[int, NDArray] = {}
 
         super().__init__(
             world=world,
@@ -595,12 +595,12 @@ class LBFAgent(Agent):
         )
 
         if (
-            self.t_first_goal_hit == -1
+            self.t_first_hit_goal == -1
             and current_task is not None
             and t is not None
             and self.in_goal_set(current_task)
         ):
-            self.t_first_goal_hit = t
+            self.t_first_hit_goal = t
 
     @property
     def pos(self) -> Position:
@@ -615,17 +615,17 @@ class LBFAgent(Agent):
     def add_goal_pos(self, pos: Position, room_idx: int) -> None:
         pos = np.array([pos])
 
-        if room_idx not in self.room_goals:
-            self.room_goals[room_idx] = pos
+        if room_idx not in self.task_goals:
+            self.task_goals[room_idx] = pos
 
-        elif not np.any(np.all(pos == self.room_goals[room_idx], axis=1)):
-            self.room_goals[room_idx] = np.vstack((self.room_goals[room_idx], pos))
+        elif not np.any(np.all(pos == self.task_goals[room_idx], axis=1)):
+            self.task_goals[room_idx] = np.vstack((self.task_goals[room_idx], pos))
 
-    def in_goal_set(self, current_room: int, pos: Position = None) -> bool:
+    def in_goal_set(self, current_task: int, pos: Position = None) -> bool:
         if pos is None:
             pos = self.pos
 
-        goal_positions = self.room_goals.get(current_room, None)
+        goal_positions = self.task_goals.get(current_task, None)
 
         if goal_positions is None:
             return False
@@ -642,7 +642,7 @@ class LBFAgent(Agent):
         self.level = level
         self.init_pos = init_pos
         self.reward: float = 0.0
-        self.t_first_goal_hit = -1
+        self.t_first_hit_goal = -1
 
     def encode(self, current_agent: bool = False) -> tuple[int]:
         """Encode a description of this object as a 3-tuple of integers

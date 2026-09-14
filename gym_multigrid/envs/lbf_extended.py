@@ -1112,14 +1112,14 @@ class LBFExtendedEnv(MultiGridEnv):
         ):
             # reward for the agents that arrived at their goals
             # penalty for arriving at different times
-            agents_hit = set([a for a in self.agents if a.t_first_goal_hit != -1])
+            agents_hit = set([a for a in self.agents if a.t_first_hit_goal != -1])
             if len(agents_hit) > 0:
                 # get all unique pairs of agents, then sum over them
                 agent_combos = list(combinations(agents_hit, r=2))
                 for combo in agent_combos:
                     # use self._episode_limit - 1 b/c agents cannot spawn on top of their goals
                     hit_reward += np.abs(
-                        combo[0].t_first_goal_hit - combo[1].t_first_goal_hit
+                        combo[0].t_first_hit_goal - combo[1].t_first_hit_goal
                     )
 
                 hit_reward /= self.max_reward_simultaneous_arrival
@@ -1130,10 +1130,10 @@ class LBFExtendedEnv(MultiGridEnv):
 
         elif self.reward_config.simultaneous_goal_reward_type == "during_episode":
             agents_hit_goal_prev = set(
-                [a for a in self.agents if 0 <= a.t_first_goal_hit < self._t]
+                [a for a in self.agents if 0 <= a.t_first_hit_goal < self._t]
             )
             agents_hit_goal_curr = set(
-                [a for a in self.agents if a.t_first_goal_hit == self._t]
+                [a for a in self.agents if a.t_first_hit_goal == self._t]
             )
 
             # compute rewards
@@ -1141,7 +1141,7 @@ class LBFExtendedEnv(MultiGridEnv):
                 agent_combos = list(product(agents_hit_goal_prev, agents_hit_goal_curr))
                 for combo in agent_combos:
                     hit_reward += np.abs(
-                        combo[0].t_first_goal_hit - combo[1].t_first_goal_hit
+                        combo[0].t_first_hit_goal - combo[1].t_first_hit_goal
                     )
             hit_reward /= self.max_reward_simultaneous_arrival
 
@@ -1615,12 +1615,12 @@ class LBFExtendedEnv(MultiGridEnv):
         )
 
     def _get_first_hit_time_obs(self, agent_idx: int):
-        if self.agents[agent_idx].t_first_goal_hit > -1:
+        if self.agents[agent_idx].t_first_hit_goal > -1:
             first_hit_time_obs = np.array(
-                [self.agents[agent_idx].t_first_goal_hit / self._episode_limit]
+                [self.agents[agent_idx].t_first_hit_goal / self._episode_limit]
             )
         else:
-            first_hit_time_obs = np.array([self.agents[agent_idx].t_first_goal_hit])
+            first_hit_time_obs = np.array([self.agents[agent_idx].t_first_hit_goal])
 
         return first_hit_time_obs
 

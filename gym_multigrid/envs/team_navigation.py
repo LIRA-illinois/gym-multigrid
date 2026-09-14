@@ -7,12 +7,13 @@ from os.path import dirname, join
 from typing import Any, Literal, Optional
 from warnings import warn
 
-import gurobipy as gp
+# import gurobipy as gp
 import numpy as np
 import pandas as pd
 import yaml
 from cv2 import INTER_CUBIC, putText, resize
-from gurobipy import GRB
+
+# from gurobipy import GRB
 from gymnasium import spaces
 from numpy.random._generator import Generator
 from numpy.typing import NDArray
@@ -69,6 +70,7 @@ class TeamNavigationEnv(MultiGridEnv):
                 "terminal_shaped_hit_times",
                 "dense_shaped_hit_times",
                 "terminal_shaped_largest_group_arrival",
+                "per_step_arrival_group_size",
             ]
             | None = None,
             time_penalty: float = -0.01,
@@ -210,6 +212,7 @@ class TeamNavigationEnv(MultiGridEnv):
         goal_type: Literal["simultaneous_arrival"] | None = None,
         observe_other_agents: bool = True,
         chosen_move_prob: float = 1.0,
+        agent_0_delay_prob: float = 0.0,
         highlight_visible_cells: bool = False,
         reward_config: dict[str, float | bool] = {
             "simultaneous_goal_reward_type": None,
@@ -227,6 +230,10 @@ class TeamNavigationEnv(MultiGridEnv):
         self.hallway = "_hall" in self._map_name
 
         self.num_agents = n_agents
+        if not 0.0 <= agent_0_delay_prob <= 1.0:
+            raise ValueError("agent_0_delay_prob must be between 0.0 and 1.0.")
+        self.agent_0_delay_prob = agent_0_delay_prob
+        self._delayed_agents = np.zeros(self.num_agents, dtype=bool)
         self.reward_config = self.RewardConfig(**reward_config)
         self.goal_type = goal_type
 
@@ -235,6 +242,7 @@ class TeamNavigationEnv(MultiGridEnv):
         self._episode_limit = episode_limit
         self._time_scale = max((self._episode_limit or 1) - 1, 1)
 
+        """
         if self.goal_type == "simultaneous_arrival":
             # solve for the reward scaling to ensure it is in [0, 1]
             # TODO check scratch.py for a n example implementation of this scaling
@@ -242,6 +250,7 @@ class TeamNavigationEnv(MultiGridEnv):
             self.max_reward_simultaneous_arrival = (
                 self._get_max_reward_simultaneous_arrival()
             )
+        """
 
         # multi-room support
         self.field_map: pd.DataFrame | None = None
@@ -524,7 +533,7 @@ class TeamNavigationEnv(MultiGridEnv):
         for agent in self.agents:
             if agent.pos is not None:
                 self.despawn_object(agent)
-            agent.t_first_goal_hit = -1
+            agent.t_first_hit_goal = -1
 
         self._place_navigation_task_goals(state)
         self._spawn_navigation_agents(state)
@@ -821,6 +830,7 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # generate new env layout
         self._gen_grid(self.width, self.height, start_task=self.current_task)
+        self._sample_agent_delays()
 
         obs: NDArray[np.int_] = self.obs
         info: dict[str, Any] = self._get_info()
@@ -862,6 +872,9 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # check if actions are valid, replace with STAY if not valid
         for agent, action in zip(self.agents, actions):
+            if self._delayed_agents[agent.index]:
+                action = self.actions.STAY
+
             # get stochastic action
             action = self.transition_prob.get_stochastic_action(
                 action,
@@ -889,17 +902,18 @@ class TeamNavigationEnv(MultiGridEnv):
         # truncated handled by TimeLimit wrapper
         truncated = False
 
+        self._sample_agent_delays()
         obs: NDArray[np.int_] = self.obs
 
         # add up cumulative rewards for this step
         reward: float = 0.0
 
         # per-step time penalty
-        reward += self.reward_config.time_penalty
-        reward += self._reward_partial_arrival()
+        # reward += self.reward_config.time_penalty
+        # reward += self._reward_partial_arrival()
 
-        if task_completed:
-            reward += self.reward_config.task_completed_bonus
+        # if task_completed:
+        #     reward += self.reward_config.task_completed_bonus
 
         if self.goal_type == "simultaneous_arrival":
             reward += self._simultaneous_arrival_reward(terminated)
@@ -907,8 +921,8 @@ class TeamNavigationEnv(MultiGridEnv):
         # check if agents are detected, update rewards if they are
         # have it only be assigned to the agent that is
         ## doesn't really matter b/c it's summed at the end over all agents, but helps w/ scaling
-        for agent in self._detected_agents:
-            agent.reward += self.reward_config.detection_penalty
+        # for agent in self._detected_agents:
+        #     agent.reward += self.reward_config.detection_penalty
 
         agent_rewards = float(np.sum([a.reward for a in self.agents]))
         reward += agent_rewards
@@ -926,9 +940,10 @@ class TeamNavigationEnv(MultiGridEnv):
         )
 
     def _reward_partial_arrival(self) -> float:
-        n_agents_at_goal = sum(agent.t_first_goal_hit != -1 for agent in self.agents)
+        n_agents_at_goal = sum(agent.t_first_hit_goal != -1 for agent in self.agents)
 
-        if n_agents_at_goal > 0:
+        # only penalizes if part of the team arrives at different times
+        if 0 < n_agents_at_goal < self.num_agents:
             return self.reward_config.partial_arrival_penalty
 
         return 0.0
@@ -947,9 +962,9 @@ class TeamNavigationEnv(MultiGridEnv):
         ):
             # reward based on the number of agents in the largest "group" that arrives simultaneously
             hit_times = [
-                agent.t_first_goal_hit
+                agent.t_first_hit_goal
                 for agent in self.agents
-                if agent.t_first_goal_hit != -1
+                if agent.t_first_hit_goal != -1
             ]
             if not hit_times:
                 return 0.0
@@ -959,61 +974,83 @@ class TeamNavigationEnv(MultiGridEnv):
             ]
             return max(simultaneous_reach_counts) / self.num_agents
 
-        # get reward / penalty for simultaneous arrival
-        hit_reward: float = 0.0
-        not_hit_reward: float = 0.0
+        if self.reward_config.simultaneous_goal_reward_type in [
+            "terminal_shaped_hit_times",
+            "dense_shaped_hit_times",
+        ]:
+            # get reward / penalty for simultaneous arrival
+            hit_reward: float = 0.0
+            not_hit_reward: float = 0.0
+
+            if (
+                self.reward_config.simultaneous_goal_reward_type
+                == "terminal_shaped_hit_times"
+                and ((self._t == self._episode_limit - 1) or terminated)
+            ):
+                # reward for the agents that arrived at their goals
+                # penalty for arriving at different times
+                agents_hit = set([a for a in self.agents if a.t_first_hit_goal != -1])
+                if len(agents_hit) > 0:
+                    # get all unique pairs of agents, then sum over them
+                    agent_combos = list(combinations(agents_hit, r=2))
+                    for combo in agent_combos:
+                        # use self._episode_limit - 1 b/c agents cannot spawn on top of their goals
+                        hit_reward += np.abs(
+                            combo[0].t_first_hit_goal - combo[1].t_first_hit_goal
+                        )
+
+                    hit_reward /= self.max_reward_simultaneous_arrival
+
+                # terminal penalty for agents that did not arrive
+                agents_not_hit = set(self.agents) - agents_hit
+                not_hit_reward = len(agents_not_hit) / len(self.agents)
+
+            elif (
+                self.reward_config.simultaneous_goal_reward_type
+                == "dense_shaped_hit_times"
+            ):
+                agents_hit_goal_prev = set(
+                    [a for a in self.agents if 0 <= a.t_first_hit_goal < self._t]
+                )
+                agents_hit_goal_curr = set(
+                    [a for a in self.agents if a.t_first_hit_goal == self._t]
+                )
+
+                # compute rewards
+                if len(agents_hit_goal_prev) > 0 and len(agents_hit_goal_curr) > 0:
+                    agent_combos = list(
+                        product(agents_hit_goal_prev, agents_hit_goal_curr)
+                    )
+                    for combo in agent_combos:
+                        hit_reward += np.abs(
+                            combo[0].t_first_hit_goal - combo[1].t_first_hit_goal
+                        )
+                hit_reward /= self.max_reward_simultaneous_arrival
+
+                # add the terminal penalty for agents that don't hit the goals
+                agents_hit_goal_prev |= agents_hit_goal_curr
+                if self._t == self._episode_limit - 1:
+                    agents_not_hit = set(self.agents) - agents_hit_goal_prev
+                    not_hit_reward = len(agents_not_hit) / len(self.agents)
+
+            reward = -1 * (0.5 * hit_reward + 0.5 * not_hit_reward)
+            return reward
 
         if (
             self.reward_config.simultaneous_goal_reward_type
-            == "terminal_shaped_hit_times"
-            and ((self._t == self._episode_limit - 1) or terminated)
+            == "per_step_arrival_group_size"
         ):
-            # reward for the agents that arrived at their goals
-            # penalty for arriving at different times
-            agents_hit = set([a for a in self.agents if a.t_first_goal_hit != -1])
-            if len(agents_hit) > 0:
-                # get all unique pairs of agents, then sum over them
-                agent_combos = list(combinations(agents_hit, r=2))
-                for combo in agent_combos:
-                    # use self._episode_limit - 1 b/c agents cannot spawn on top of their goals
-                    hit_reward += np.abs(
-                        combo[0].t_first_goal_hit - combo[1].t_first_goal_hit
-                    )
+            # get n of agents that arrive at this time
+            # the info in this set could also be constructed by taking the previous state + the state after moving the agents, and figuring out which agents just arrived at their goal states, this was just an easier implementation :P
+            arrived_agents = [
+                agent for agent in self.agents if agent.t_first_hit_goal == self._t
+            ]
 
-                hit_reward /= self.max_reward_simultaneous_arrival
+            # exponential might cause numerical issues, really blows up around 20 agents or so
+            # return 2 ** len(arrived_agents) / (2**self.num_agents)
+            return len(arrived_agents) ** 2 / (self.num_agents**2)
 
-            # terminal penalty for agents that did not arrive
-            agents_not_hit = set(self.agents) - agents_hit
-            not_hit_reward = len(agents_not_hit) / len(self.agents)
-
-        elif (
-            self.reward_config.simultaneous_goal_reward_type == "dense_shaped_hit_times"
-        ):
-            agents_hit_goal_prev = set(
-                [a for a in self.agents if 0 <= a.t_first_goal_hit < self._t]
-            )
-            agents_hit_goal_curr = set(
-                [a for a in self.agents if a.t_first_goal_hit == self._t]
-            )
-
-            # compute rewards
-            if len(agents_hit_goal_prev) > 0 and len(agents_hit_goal_curr) > 0:
-                agent_combos = list(product(agents_hit_goal_prev, agents_hit_goal_curr))
-                for combo in agent_combos:
-                    hit_reward += np.abs(
-                        combo[0].t_first_goal_hit - combo[1].t_first_goal_hit
-                    )
-            hit_reward /= self.max_reward_simultaneous_arrival
-
-            # add the terminal penalty for agents that don't hit the goals
-            agents_hit_goal_prev |= agents_hit_goal_curr
-            if self._t == self._episode_limit - 1:
-                agents_not_hit = set(self.agents) - agents_hit_goal_prev
-                not_hit_reward = len(agents_not_hit) / len(self.agents)
-
-        reward = -1 * (0.5 * hit_reward + 0.5 * not_hit_reward)
-
-        return reward
+        return 0.0
 
     def _move_agents(self, next_positions: dict[Position, list]) -> None:
         # if two or more agents try to move to the same position they all fail and stay at their current position
@@ -1035,7 +1072,7 @@ class TeamNavigationEnv(MultiGridEnv):
     def _update_task(self) -> bool:
         # task only successfully completed if all agents reach goal at the same time
         simultaneous_goal_reached = all(
-            agent.t_first_goal_hit == self._t for agent in self.agents
+            agent.t_first_hit_goal == self._t for agent in self.agents
         )
 
         if simultaneous_goal_reached:
@@ -1102,9 +1139,9 @@ class TeamNavigationEnv(MultiGridEnv):
         # step info
         info = {}
 
-        agents_hit = [agent for agent in self.agents if agent.t_first_goal_hit != -1]
+        agents_hit = [agent for agent in self.agents if agent.t_first_hit_goal != -1]
         info["sum_goal_hit_time_difference"] = sum(
-            abs(agent_a.t_first_goal_hit - agent_b.t_first_goal_hit)
+            abs(agent_a.t_first_hit_goal - agent_b.t_first_hit_goal)
             for agent_a, agent_b in combinations(agents_hit, r=2)
         )
 
@@ -1123,6 +1160,21 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # use multigrid's basic state for now, come back to this later
         match self.state_type:
+            case "simple_navigation_features":
+                agent_features = np.concatenate(
+                    [
+                        self._get_navigation_agent_features(i)
+                        for i in range(self.num_agents)
+                    ]
+                )
+                state = np.concatenate(
+                    (
+                        agent_features,
+                        self._get_navigation_goal_positions().flatten(),
+                        # self._get_elapsed_time_obs(),
+                    )
+                )
+
             case "multigrid_flattened":
                 # NOTE: compared to original, currently does NOT have the coordinates of other objects in the ego agent's frame, so that could reduce training performance
                 state = self.grid.encode()
@@ -1137,23 +1189,10 @@ class TeamNavigationEnv(MultiGridEnv):
                     )
                     state = np.concatenate([state, first_hit_times.flatten()])
 
-            case "simple_navigation_features":
-                agent_features = np.concatenate(
-                    [
-                        self._get_navigation_agent_features(i)
-                        for i in range(self.num_agents)
-                    ]
-                )
-                state = np.concatenate(
-                    (
-                        agent_features,
-                        self._get_navigation_goal_positions().flatten(),
-                        self._get_elapsed_time_obs(),
-                    )
-                )
-
             case _:
                 raise NotImplementedError
+
+        state = np.concatenate([state, self._delayed_agents.astype(np.float32)])
 
         return state
 
@@ -1186,6 +1225,11 @@ class TeamNavigationEnv(MultiGridEnv):
         # return an obs of size (num_agents, num_obs_features)
         # use multigrid's basic obs for now, come back to this later
         match self.env_obs_type:
+            case "simple_navigation_features":
+                obs = np.vstack(
+                    [self._get_navigation_features(i) for i in range(self.num_agents)]
+                )
+
             case "multigrid_flattened":
                 # one issues w/ this obs is that agents can see when goals disappear (i.e., by another agent reaching it), so that leaks some information that I don't want the agents to have
                 # I need to force them to rely on comms to solve this task, and if they don't have to use comms, they won't
@@ -1204,11 +1248,6 @@ class TeamNavigationEnv(MultiGridEnv):
 
                 obs = np.vstack(obs_list)
 
-            case "simple_navigation_features":
-                obs = np.vstack(
-                    [self._get_navigation_features(i) for i in range(self.num_agents)]
-                )
-
             case _:
                 raise NotImplementedError
         return obs
@@ -1218,15 +1257,23 @@ class TeamNavigationEnv(MultiGridEnv):
             (
                 self._get_navigation_agent_features(agent_idx),
                 self._get_navigation_goal_positions().flatten(),
+                np.array([self._delayed_agents[agent_idx]], dtype=np.float32),
             )
         ).astype(np.float32)
+
+    def _sample_agent_delays(self) -> None:
+        self._delayed_agents.fill(False)
+        if self.num_agents > 1:
+            self._delayed_agents[0] = self.np_random.random() < self.agent_0_delay_prob
 
     def _get_navigation_agent_features(self, agent_idx: int) -> NDArray[np.float32]:
         coordinate_scale = self._get_navigation_coordinate_scale()
         agent_position = np.asarray(self.agents[agent_idx].pos, dtype=np.float32)
         agent_position = agent_position / coordinate_scale
+        return agent_position
 
-        hit_time = self.agents[agent_idx].t_first_goal_hit
+        """
+        hit_time = self.agents[agent_idx].t_first_hit_goal
         # binary representation of whether the agent has hit a goal state yet or not
         has_hit = float(hit_time >= 0)
         if hit_time >= 0:
@@ -1240,6 +1287,7 @@ class TeamNavigationEnv(MultiGridEnv):
                 np.array([has_hit, normalized_hit_time], dtype=np.float32),
             )
         ).astype(np.float32)
+        """
 
     def _get_navigation_goal_positions(self) -> NDArray[np.float32]:
         coordinate_scale = self._get_navigation_coordinate_scale()
@@ -1263,12 +1311,12 @@ class TeamNavigationEnv(MultiGridEnv):
 
     # obs helpers
     def _get_first_hit_time_obs(self, agent_idx: int):
-        if self.agents[agent_idx].t_first_goal_hit > -1:
+        if self.agents[agent_idx].t_first_hit_goal > -1:
             first_hit_time_obs = np.array(
-                [self.agents[agent_idx].t_first_goal_hit / self._episode_limit]
+                [self.agents[agent_idx].t_first_hit_goal / self._episode_limit]
             )
         else:
-            first_hit_time_obs = np.array([self.agents[agent_idx].t_first_goal_hit])
+            first_hit_time_obs = np.array([self.agents[agent_idx].t_first_hit_goal])
 
         return first_hit_time_obs
 
@@ -1312,7 +1360,7 @@ class TeamNavigationEnv(MultiGridEnv):
                     high=1.0,
                     shape=(
                         self.num_agents,
-                        4 + 2 * len(self._configured_goal_positions),
+                        3 + 2 * len(self._configured_goal_positions),
                     ),
                     dtype=np.float32,
                 )
@@ -1330,20 +1378,19 @@ class TeamNavigationEnv(MultiGridEnv):
         # available actions
         _avail_actions_team = []
         for agent in self.agents:
-            # prevent agents from moving if they are in their goal state
-            if agent.in_goal_set(self.current_task):
+            if (
+                agent.in_goal_set(self.current_task)
+                or self._delayed_agents[agent.index]
+            ):
+                # prevent agents from moving if they are in their goal state or delayed
                 avail_actions_dict = {
-                    action.name: False
-                    for action in self.actions
-                    if action.name != ["STAY"]
+                    action.name: action == self.actions.STAY for action in self.actions
                 }
-                avail_actions_dict["STAY"] = True
             else:
-                # following Gymma, all actions are always available
+                # all actions are available
                 avail_actions_dict = {action.name: True for action in self.actions}
 
             _avail_actions_team.append(list(avail_actions_dict.values()))
-
         return _avail_actions_team
 
     def _get_valid_actions(self, agent: LBFAgent) -> list[int]:
@@ -1476,9 +1523,10 @@ class TeamNavigationEnv(MultiGridEnv):
 
         cell = self.grid.get(*pos)
 
-        if not spawn:
-            return cell is None or cell.can_overlap()
+        if spawn:
+            # only allow agents to spawn on empty spaces
+            # spawning on other objects causes those objects to permanently despawn
+            return cell is None
 
         else:
-            # do not allow agents to spawn on top of other objects, can cause those objects to permanently despawn
-            return cell is None
+            return cell is None or cell.can_overlap()
