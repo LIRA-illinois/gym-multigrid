@@ -226,7 +226,7 @@ class TeamNavigationEnv(MultiGridEnv):
         """
         Initialize the env.
         """
-        self._map_name = map_name
+        self._map_name = map_name or ""
         self.hallway = "_hall" in self._map_name
 
         self.num_agents = n_agents
@@ -259,7 +259,7 @@ class TeamNavigationEnv(MultiGridEnv):
         self.num_rooms: int
         self.room_has_goals: dict[int, bool] = {0: False}
 
-        if map is not None:
+        if map_name is not None:
             if width is not None or height is not None:
                 warn("(height, width) and field map provided, using field map size.")
 
@@ -353,8 +353,8 @@ class TeamNavigationEnv(MultiGridEnv):
         if self.navigation_task_catalog:
             positions = {
                 tuple(position)
-                for state in self.navigation_task_catalog
-                for position in self.navigation_task_catalog[state].goal_positions
+                for transition in self.navigation_task_catalog
+                for position in self.navigation_task_catalog[transition].goal_positions
             }
             return tuple(sorted(positions))
 
@@ -487,7 +487,13 @@ class TeamNavigationEnv(MultiGridEnv):
 
         return field_map
 
-    def _gen_grid(self, width: int, height: int, start_task: int = 0) -> None:
+    def _gen_grid(
+        self,
+        width: int,
+        height: int,
+        start_task: int = 0,
+        navigation_task_transition: tuple[int, int] | None = None,
+    ) -> None:
         # Create a blank grid for this episode
         self.grid = Grid(width, height, self.world)
 
@@ -504,7 +510,8 @@ class TeamNavigationEnv(MultiGridEnv):
             self.grid.wall_rect(x=0, y=0, w=self.width, h=self.height)
 
         if self.navigation_task_catalog:
-            self._place_navigation_task_goals(start_task)
+            transition = navigation_task_transition or (start_task, start_task)
+            self._place_navigation_task_goals(*transition)
 
         # objects spawned before init_grid is initialized will respawn after an agent steps on them and leaves that cell
         # need separate logic to modify self.init_grid to despawn those objects if desired
@@ -512,7 +519,8 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # spawn agents
         if self.navigation_task_catalog:
-            self._spawn_navigation_agents(start_task)
+            transition = navigation_task_transition or (start_task, start_task)
+            self._spawn_navigation_agents(*transition)
         else:
             self._spawn_agents()
 
@@ -521,12 +529,11 @@ class TeamNavigationEnv(MultiGridEnv):
         if start_task > 0 and not self.navigation_task_catalog:
             self._apply_start_task_adjustments(start_task)
 
-    def activate_navigation_task(self, state: int) -> None:
+    def activate_navigation_task(self, from_state: int, to_state: int) -> None:
         """Switch the active catalog task without resetting the episode clock."""
         if not self.navigation_task_catalog:
             raise RuntimeError("No state-keyed navigation task catalog is configured.")
-        if state not in self.navigation_task_catalog:
-            raise ValueError(f"No navigation task configured for state {state}.")
+        self.navigation_task_catalog.task_for(from_state, to_state)
 
         for obj in self.room_despawn_objects.get(self.active_task_state, []):
             self.despawn_object(obj)
@@ -535,20 +542,17 @@ class TeamNavigationEnv(MultiGridEnv):
                 self.despawn_object(agent)
             agent.t_first_hit_goal = -1
 
-        self._place_navigation_task_goals(state)
-        self._spawn_navigation_agents(state)
+        self._place_navigation_task_goals(from_state, to_state)
+        self._spawn_navigation_agents(from_state, to_state)
 
-    def _place_navigation_task_goals(self, state: int) -> None:
-        if (
-            self.navigation_task_catalog is None
-            or state not in self.navigation_task_catalog
-        ):
-            raise ValueError(f"No navigation task configured for state {state}.")
-        task = self.navigation_task_catalog[state]
+    def _place_navigation_task_goals(self, from_state: int, to_state: int) -> None:
+        if self.navigation_task_catalog is None:
+            raise ValueError("No navigation task catalog is configured.")
+        task = self.navigation_task_catalog.task_for(from_state, to_state)
 
-        self.active_task_state = state
-        self.current_task = state
-        self.room_despawn_objects[state] = []
+        self.active_task_state = to_state
+        self.current_task = to_state
+        self.room_despawn_objects[to_state] = []
         for agent, goal_position in zip(self.agents, task.goal_positions):
             goal = Goal(
                 self.world,
@@ -558,16 +562,13 @@ class TeamNavigationEnv(MultiGridEnv):
             self.place_object(goal, pos=goal_position)
             if hasattr(self, "init_grid"):
                 self.init_grid.set(*goal_position, goal)
-            agent.room_goals = {state: np.asarray([goal_position], dtype=np.int_)}
-            self.room_despawn_objects[state].append(goal)
+            agent.room_goals = {to_state: np.asarray([goal_position], dtype=np.int_)}
+            self.room_despawn_objects[to_state].append(goal)
 
-    def _spawn_navigation_agents(self, state: int) -> None:
-        if (
-            self.navigation_task_catalog is None
-            or state not in self.navigation_task_catalog
-        ):
-            raise ValueError(f"No navigation task configured for state {state}.")
-        task = self.navigation_task_catalog[state]
+    def _spawn_navigation_agents(self, from_state: int, to_state: int) -> None:
+        if self.navigation_task_catalog is None:
+            raise ValueError("No navigation task catalog is configured.")
+        task = self.navigation_task_catalog.task_for(from_state, to_state)
 
         joint_positions = task.init_state_dist.states[
             self.np_random.choice(
@@ -576,13 +577,13 @@ class TeamNavigationEnv(MultiGridEnv):
         ]
         if len(joint_positions) != self.num_agents:
             raise ValueError(
-                f"Navigation task {state} must define one spawn position per agent."
+                f"Navigation task {from_state}->{to_state} must define one spawn position per agent."
             )
 
         for agent, position in zip(self.agents, joint_positions):
             if not self._check_valid_pos(position, spawn=True):
                 raise ValueError(
-                    f"Navigation task {state} has an invalid spawn position {position}."
+                    f"Navigation task {from_state}->{to_state} has an invalid spawn position {position}."
                 )
             agent.reset(init_pos=position)
             self.place_agent(agent, pos=position, init_grid=self.init_grid)
@@ -814,6 +815,11 @@ class TeamNavigationEnv(MultiGridEnv):
         # current room / task
         self.current_task = 0
         self.active_task_state = 0
+        navigation_task_transition = None
+        if options is not None and "navigation_task_transition" in options:
+            navigation_task_transition = tuple(
+                int(state) for state in options["navigation_task_transition"]
+            )
         if options is not None and "navigation_task_state" in options:
             self.current_task = int(options["navigation_task_state"])
             self.active_task_state = self.current_task
@@ -821,15 +827,23 @@ class TeamNavigationEnv(MultiGridEnv):
             self.current_task = int(options["hl_start_state"])
             self.active_task_state = self.current_task
 
-        if (
-            self.navigation_task_catalog
-            and self.current_task not in self.navigation_task_catalog
-        ):
-            self.current_task = self.navigation_task_catalog.first_state()
+        if navigation_task_transition is not None:
+            self.current_task = navigation_task_transition[1]
+            self.active_task_state = self.current_task
+        elif self.navigation_task_catalog:
+            navigation_task_transition = self.navigation_task_catalog.first_transition(
+                self.current_task
+            )
+            self.current_task = navigation_task_transition[1]
             self.active_task_state = self.current_task
 
         # generate new env layout
-        self._gen_grid(self.width, self.height, start_task=self.current_task)
+        self._gen_grid(
+            self.width,
+            self.height,
+            start_task=self.current_task,
+            navigation_task_transition=navigation_task_transition,
+        )
         self._sample_agent_delays()
 
         obs: NDArray[np.int_] = self.obs
@@ -1170,7 +1184,12 @@ class TeamNavigationEnv(MultiGridEnv):
                 state = np.concatenate(
                     (
                         agent_features,
-                        self._get_navigation_goal_positions().flatten(),
+                        np.concatenate(
+                            [
+                                self._get_navigation_goal_positions(i)
+                                for i in range(self.num_agents)
+                            ]
+                        ),
                         # self._get_elapsed_time_obs(),
                     )
                 )
@@ -1256,7 +1275,7 @@ class TeamNavigationEnv(MultiGridEnv):
         return np.concatenate(
             (
                 self._get_navigation_agent_features(agent_idx),
-                self._get_navigation_goal_positions().flatten(),
+                self._get_navigation_goal_positions(agent_idx),
                 np.array([self._delayed_agents[agent_idx]], dtype=np.float32),
             )
         ).astype(np.float32)
@@ -1289,14 +1308,15 @@ class TeamNavigationEnv(MultiGridEnv):
         ).astype(np.float32)
         """
 
-    def _get_navigation_goal_positions(self) -> NDArray[np.float32]:
+    def _get_navigation_goal_positions(self, agent_idx: int) -> NDArray[np.float32]:
         coordinate_scale = self._get_navigation_coordinate_scale()
         goal_positions = np.asarray(
-            self._configured_goal_positions, dtype=np.float32
+            self.agents[agent_idx].room_goals.get(self.current_task, []),
+            dtype=np.float32,
         ).reshape(-1, 2)
-        if len(goal_positions) > 0:
-            goal_positions = goal_positions / coordinate_scale
-        return goal_positions
+        if len(goal_positions) == 0:
+            return np.zeros(2, dtype=np.float32)
+        return goal_positions[0] / coordinate_scale
 
     def _get_elapsed_time_obs(self) -> NDArray[np.float32]:
         return np.array(
@@ -1360,7 +1380,7 @@ class TeamNavigationEnv(MultiGridEnv):
                     high=1.0,
                     shape=(
                         self.num_agents,
-                        3 + 2 * len(self._configured_goal_positions),
+                        5,
                     ),
                     dtype=np.float32,
                 )
@@ -1425,9 +1445,18 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # render actions in a separate image that we then append to base env image
         # determine info image width and create a blank white image
-        info_img = 255 * np.ones((img.shape[0], 5 * self.tile_size, 3), dtype=img.dtype)
+        sidebar_width = max(12 * self.tile_size, self.num_agents * 2 * self.tile_size)
         x_text = 5
         line_height = int(self.tile_size * 0.5)
+
+        # ensure pre_step_actions is a 1D array
+        if len(self._pre_step_actions.shape) > 1:
+            self._pre_step_actions = self._pre_step_actions.flatten()
+
+        action_panel_height = (len(self._pre_step_actions) + 3) * line_height
+        info_img = 255 * np.ones(
+            (action_panel_height, sidebar_width, 3), dtype=img.dtype
+        )
 
         # header with basic info
         time_header = f"t : {self._t_render}"
@@ -1440,10 +1469,6 @@ class TeamNavigationEnv(MultiGridEnv):
         action_header = "Agent : Pre-step action"
         putText(info_img, action_header, (x_text, y_text), **HEADER_TEXT_CONFIG)
 
-        # ensure pre_step_actions is a 1D array
-        if len(self._pre_step_actions.shape) > 1:
-            self._pre_step_actions = self._pre_step_actions.flatten()
-
         # start_y set below header to avoid overlap
         for i, action in enumerate(self._pre_step_actions):
             # convert from int to action name if not none
@@ -1454,8 +1479,23 @@ class TeamNavigationEnv(MultiGridEnv):
             y_text += line_height
             putText(info_img, text, (x_text, y_text), **RENDER_TEXT_CONFIG)
 
-        # append info image to the right of env image
-        img = np.concatenate([img, info_img], axis=1)
+        # place observations directly below the action summary in the sidebar
+        observation_img = self._render_agent_observations(sidebar_width)
+        sidebar = np.concatenate([info_img, observation_img], axis=0)
+        if img.shape[0] < sidebar.shape[0]:
+            padded_img = 255 * np.ones(
+                (sidebar.shape[0], img.shape[1], img.shape[2]), dtype=img.dtype
+            )
+            padded_img[: img.shape[0]] = img
+            img = padded_img
+        elif sidebar.shape[0] < img.shape[0]:
+            padded_sidebar = 255 * np.ones(
+                (img.shape[0], sidebar.shape[1], sidebar.shape[2]),
+                dtype=sidebar.dtype,
+            )
+            padded_sidebar[: sidebar.shape[0]] = sidebar
+            sidebar = padded_sidebar
+        img = np.concatenate([img, sidebar], axis=1)
 
         # upscale until at least 360p
         upscale_mult = 1
@@ -1471,8 +1511,111 @@ class TeamNavigationEnv(MultiGridEnv):
         )
         img = resize(img, new_dims, interpolation=INTER_CUBIC)
 
-        "example text is here, this is my example text"
         return img
+
+    def _render_agent_observations(self, width: int) -> NDArray[np.uint8]:
+        """Render the information available to each agent."""
+        if self.env_obs_type == "multigrid_flattened":
+            grids, _ = self.gen_obs_grid()
+            view_size = self.agent_view_size or grids[0].width
+            margin = 8
+            tile_size = max(
+                8,
+                min(
+                    self.tile_size // 2,
+                    max(
+                        (width - (self.num_agents + 1) * margin)
+                        // (self.num_agents * view_size),
+                        8,
+                    ),
+                ),
+            )
+            local_images = []
+            observe_other_agents = getattr(self, "observe_other_agents", True)
+            for agent, grid in zip(self.agents, grids):
+                if not observe_other_agents:
+                    center = (grid.width // 2, grid.height // 2)
+                    for x in range(grid.width):
+                        for y in range(grid.height):
+                            obj = grid.get(x, y)
+                            if (
+                                obj is not None
+                                and obj.type == "agent"
+                                and (x, y) != center
+                            ):
+                                grid.set(x, y, None)
+                local_images.append(grid.render(tile_size))
+
+            line_height = int(self.tile_size * 0.5)
+            header_height = 2 * self.tile_size
+            panel_height = header_height + max(image.shape[0] for image in local_images)
+            panel = 255 * np.ones((panel_height, width, 3), dtype=np.uint8)
+            putText(
+                panel,
+                "Agent observations (local view)",
+                (5, self.tile_size),
+                **HEADER_TEXT_CONFIG,
+            )
+            y_offset = header_height
+            for index, local_image in enumerate(local_images):
+                x_offset = margin + index * (local_image.shape[1] + margin)
+                putText(
+                    panel,
+                    f"Agent {index}",
+                    (x_offset, y_offset - 2),
+                    **RENDER_TEXT_CONFIG,
+                )
+                panel[
+                    y_offset : y_offset + local_image.shape[0],
+                    x_offset : x_offset + local_image.shape[1],
+                ] = local_image
+            return panel
+
+        observations = np.asarray(self.obs)
+        coordinate_scale = self._get_navigation_coordinate_scale()
+        component_labels = ["agent_x", "agent_y", "goal_x", "goal_y", "delay"]
+        line_height = int(self.tile_size * 0.5)
+        header_height = 2 * self.tile_size
+        panel_height = header_height + (len(component_labels) + 1) * line_height
+        panel = 255 * np.ones((panel_height, width, 3), dtype=np.uint8)
+
+        putText(
+            panel,
+            "Agent observations (feature vectors)",
+            (5, self.tile_size),
+            **HEADER_TEXT_CONFIG,
+        )
+
+        card_width = width // self.num_agents
+        for index, observation in enumerate(observations):
+            x_offset = index * card_width + 5
+            y_text = header_height
+            putText(
+                panel,
+                f"Agent {index}",
+                (x_offset, y_text),
+                **RENDER_TEXT_CONFIG,
+            )
+            display_observation = observation.copy()
+            display_observation[:-1] = display_observation[:-1] * np.tile(
+                coordinate_scale, 2
+            )
+            for label, value in zip(component_labels, display_observation):
+                y_text += line_height
+                rendered_value = (
+                    "ON"
+                    if label == "delay" and value > 0.5
+                    else "OFF"
+                    if label == "delay"
+                    else f"{value:.0f}"
+                )
+                putText(
+                    panel,
+                    f"{label}: {rendered_value}",
+                    (x_offset, y_text),
+                    **RENDER_TEXT_CONFIG,
+                )
+        return panel
 
     @property
     def t_render(self) -> str:

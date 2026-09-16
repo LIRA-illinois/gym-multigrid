@@ -1,4 +1,3 @@
-import itertools as it
 from typing import Literal, Optional
 
 import matplotlib.pyplot as plt
@@ -8,6 +7,7 @@ import pandas as pd
 from gymnasium import Env, spaces
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from networkx.drawing.nx_agraph import graphviz_layout
 from numpy.typing import NDArray
 
 from gym_multigrid.core.constants import COLORS
@@ -46,24 +46,34 @@ class ProjectMDP(Env):
 
     def __init__(
         self,
-        num_rooms: int,
-        msg_budget_per_agent: list[int],
+        num_rooms: int = 2,
+        msg_budget_per_agent: list[int] | None = None,
         task_type: Literal["atomic", "composed"] = "composed",
+        transitions: list[tuple[int, int]] | None = None,
+        states: list[int] | None = None,
+        initial_state: int = 0,
+        goal_states: list[int] | None = None,
+        add_post_goal_state: bool = True,
     ):
         super().__init__()
 
         self.agent = MDPAgent(init_state=0)
         self.tasks: list[tuple]
         self.init_state: int
-        self.goal_state: int
+        self.goal_states: set[int]
         self.fail_state: int
         self.state_space: NDArray[np.int_]
         self.successor_map: dict[tuple[int, tuple], int]
-        self.msg_budget_per_agent = msg_budget_per_agent
+        self.msg_budget_per_agent = msg_budget_per_agent or [1]
 
         self._build_env(
             num_rooms=num_rooms,
             task_type=task_type,
+            transitions=transitions,
+            states=states,
+            initial_state=initial_state,
+            goal_states=goal_states,
+            add_post_goal_state=add_post_goal_state,
         )
 
         self.task_completed: bool = False
@@ -90,6 +100,11 @@ class ProjectMDP(Env):
         self,
         num_rooms: int,
         task_type: Literal["atomic", "composed"],
+        transitions: list[tuple[int, int]] | None,
+        states: list[int] | None,
+        initial_state: int,
+        goal_states: list[int] | None,
+        add_post_goal_state: bool = True,
     ):
         """
         assume 1 set of waypoints per room
@@ -99,30 +114,55 @@ class ProjectMDP(Env):
          - composed task = "current room cleared of fruit" and "all agents reach the current room's waypoint" are True
         """
 
-        match (num_rooms, task_type):
-            case (2, "composed"):
-                """
-                0 -> 1 -> 2
-                """
-                # need to pre-define the tasks in the project MDP
-                # tasks = edges in a graph
-                self.tasks: list[tuple] = [(0, 1), (1, 2)]
-
-            case _:
+        if transitions is None:
+            if (num_rooms, task_type) != (2, "composed"):
                 raise NotImplementedError
+            transitions = [(0, 1), (1, 2)]
+            states = [0, 1, 2]
+            initial_state = 0
+            goal_states = [2]
 
-        self.state_space = [i for i in range(0, len(self.tasks) + 2)]
-        self.init_state = self.state_space[0]
-        self.goal_state = self.state_space[-2]
-        self.fail_state = self.state_space[-1]
+        self.tasks = [
+            (int(source), int(destination)) for source, destination in transitions
+        ]
+        graph_states = set(states or ())
+        graph_states.update(state for edge in self.tasks for state in edge)
+        if initial_state not in graph_states:
+            raise ValueError(
+                f"Initial state {initial_state} is not in the MDP state set."
+            )
+
+        self.init_state = initial_state
+        # initial goal states (before optionally adding a post-goal state)
+        initial_goal_states = set(goal_states or [max(graph_states)])
+
+        # Optionally insert one additional state after the current goal state
+        # and make that the MDP's goal state. This is useful for testing
+        # transitions that occur after the 'legacy' goal.
+        if add_post_goal_state:
+            post_state = max(graph_states) + 1
+            graph_states.add(post_state)
+            # add transitions from each initial goal to the new post-goal state
+            for g in initial_goal_states:
+                self.tasks.append((g, post_state))
+
+            self.goal_states = {post_state}
+        else:
+            self.goal_states = initial_goal_states
+        if not self.goal_states <= graph_states:
+            raise ValueError("All goal states must be present in the MDP state set.")
+        self.fail_state = max(graph_states) + 1
+        self.state_space = sorted(graph_states) + [self.fail_state]
+
+        self.goal_state = next(iter(self.goal_states))
 
         # include "stay" task for self-transition of absorbing states
-        for state in [self.goal_state, self.fail_state]:
+        for state in [*self.goal_states, self.fail_state]:
             self.tasks.append((state, state))
 
         self.observation_space = spaces.Discrete(n=len(self.state_space))
 
-        # Action space: 2D discrete-continuous vector (task_idx, comms_val in [0, 1])
+        # Action space: destination state and communication budget.
         self.n_tasks = len(self.tasks)
         self.action_space = spaces.Box(
             low=np.array([0, 0.0]),
@@ -174,14 +214,11 @@ class ProjectMDP(Env):
         self._transition_probs = pd.DataFrame.from_records(transition_probs)
 
     def _get_state_type(self, state: int) -> Literal["goal", "fail", "normal"]:
-        match state:
-            case self.goal_state:
-                state_type = "goal"
-            case self.fail_state:
-                state_type = "fail"
-            case _:
-                state_type = "normal"
-        return state_type
+        if state in self.goal_states:
+            return "goal"
+        if state == self.fail_state:
+            return "fail"
+        return "normal"
 
     def step(
         self,
@@ -212,7 +249,7 @@ class ProjectMDP(Env):
         self.agent.state = next_state
 
         # Determine reward and termination
-        terminated = self.agent.state == self.goal_state
+        terminated = self.agent.state in self.goal_states
         project_failed = self.agent.state == self.fail_state
 
         # reward = 1.0 if terminated else (-0.01 if failed else 0.0)
@@ -332,6 +369,7 @@ class ProjectMDP(Env):
         self,
         action: Optional[dict] = None,
         img_shape: tuple[float] = (6, 3),
+        dpi: int = 200,
     ):
         # make an image of the MDP using networkX to show the nodes + available edges between them
         # only set up the MDP graph once during training
@@ -351,14 +389,22 @@ class ProjectMDP(Env):
                 ]
 
                 for _, row in df_edge.iterrows():
-                    self.graph.add_edges_from(
-                        [
-                            (
-                                row.state,
-                                row.next_state,
-                                {"action": row.action},
-                            ),
-                        ]
+                    edge_action = tuple(row.action)
+                    if row.next_state == self.fail_state:
+                        # Failure does not depend on which successor task was
+                        # selected. Show one failure edge per comms budget.
+                        edge_action = (self.fail_state, edge_action[1])
+                        if self.graph.has_edge(
+                            row.state,
+                            row.next_state,
+                            key=edge_action[1],
+                        ):
+                            continue
+                    self.graph.add_edge(
+                        row.state,
+                        row.next_state,
+                        key=edge_action[1],
+                        action=edge_action,
                     )
 
             self.node_colors: list = []
@@ -386,14 +432,20 @@ class ProjectMDP(Env):
         if action is not None:
             action_tuple = self._get_action_tuple(action)
             for i, (*edge, attrs) in enumerate(self.graph.edges(keys=True, data=True)):
-                if edge[0] == self.agent.state and attrs["action"] == action_tuple:
+                is_selected_action = attrs["action"] == action_tuple
+                is_selected_failure = (
+                    edge[1] == self.fail_state and attrs["action"][1] == action_tuple[1]
+                )
+                if edge[0] == self.agent.state and (
+                    is_selected_action or is_selected_failure
+                ):
                     if edge[1] == self.fail_state:
                         edge_outline_colors[i] = "red"
                     else:
                         edge_outline_colors[i] = "green"
                     edge_outline_widths[i] = self.edge_widths["highlight"]
 
-        fig, ax = plt.subplots(figsize=img_shape)
+        fig, ax = plt.subplots(figsize=img_shape, dpi=dpi)
 
         # render the graph
         self._draw_labeled_multigraph(
@@ -420,20 +472,76 @@ class ProjectMDP(Env):
         edge_outline_colors: list,
         edge_outline_widths: list,
     ):
-        """
-        https://networkx.org/documentation/stable/auto_examples/drawing/plot_multigraphs.html
-        Length of connectionstyle must be at least that of a maximum number of edges
-        between pair of nodes. This number is maximum one-sided
-        for directed graph and maximum total connections for undirected graph.
-        """
-        # Works with arc3 and angle3 connectionstyles
-        connectionstyle = [f"arc3,rad={r}" for r in it.accumulate([0.15] * 4)]
+        """Draw the MDP with routed, individually curved edges.
 
-        # spectral is a decent layout
-        pos = nx.spectral_layout(G)
-        # pos = nx.spring_layout(G, k=5/np.sqrt(G.order()))
-        # pos = nx.planar_layout(G)
-        # pos = nx.shell_layout(G)
+        The failure state is intentionally excluded from the layout graph. A
+        direct edge from every task state to a common failure state otherwise
+        makes Graphviz route long edges through the task graph.
+        """
+        layout_graph = nx.DiGraph()
+        layout_graph.add_nodes_from(G.nodes)
+        layout_graph.add_edges_from(
+            (source, target)
+            for source, target, _key, _attrs in G.edges(keys=True, data=True)
+            if target != self.fail_state
+        )
+
+        # "dot" and Grankdir give nice left-to-right graphs for DAGs
+        pos = graphviz_layout(
+            layout_graph,
+            prog="dot",
+            args="-Grankdir=LR -Gnodesep=2.0 -Granksep=2.2",
+        )
+
+        # Center the failure sink inside the branching portion of this task
+        # graph. The post-goal tail (4 -> 5) remains to the right.
+        task_positions = np.asarray(
+            [pos[node] for node in layout_graph if node != self.fail_state],
+            dtype=float,
+        )
+        x_min, y_min = task_positions.min(axis=0)
+        x_max, y_max = task_positions.max(axis=0)
+        x_span = max(x_max - x_min, 1.0)
+        y_span = max(y_max - y_min, 1.0)
+        failure_anchor_states = [state for state in (0, 1, 2, 3) if state in pos]
+        if len(failure_anchor_states) < 2:
+            failure_anchor_states = [
+                state for state in layout_graph if state != self.fail_state
+            ]
+        failure_anchor_positions = np.asarray(
+            [pos[state] for state in failure_anchor_states],
+            dtype=float,
+        )
+        pos[self.fail_state] = tuple(failure_anchor_positions.mean(axis=0))
+
+        edge_data = list(G.edges(keys=True, data=True))
+        edge_groups: dict[tuple[int, int], list[tuple]] = {}
+        for edge in edge_data:
+            edge_groups.setdefault((edge[0], edge[1]), []).append(edge)
+
+        edge_curvatures: dict[tuple[int, int, int], float] = {}
+        for (source, target), edges in edge_groups.items():
+            if source == target:
+                radii = [0.35] * len(edges)
+            elif target == self.fail_state:
+                # Failure arcs fan symmetrically into the central sink.
+                center = 0.0
+                spacing = 0.24
+                radii = [
+                    center + spacing * (index - (len(edges) - 1) / 2)
+                    for index in range(len(edges))
+                ]
+            elif len(edges) == 1:
+                radii = [0.0]
+            else:
+                spacing = 0.26
+                radii = [
+                    spacing * (index - (len(edges) - 1) / 2)
+                    for index in range(len(edges))
+                ]
+
+            for edge, radius in zip(edges, radii):
+                edge_curvatures[edge[:3]] = radius
 
         # draw nodes + labels
         nx.draw_networkx_nodes(
@@ -446,29 +554,65 @@ class ProjectMDP(Env):
         )
         nx.draw_networkx_labels(G, pos, font_size=10, ax=ax)
 
-        # draw edges + labels
-        labels = {}
-        for *edge, attrs in G.edges(keys=True, data=True):
-            labels[tuple(edge)] = f"a={attrs[edge_label]}"
-
-        nx.draw_networkx_edges(
-            G,
-            pos,
-            edge_color=edge_outline_colors,
-            width=edge_outline_widths,
-            connectionstyle=connectionstyle,
-            ax=ax,
-        )
-        nx.draw_networkx_edge_labels(
-            G,
-            pos,
-            labels,
-            connectionstyle=connectionstyle,
-            label_pos=0.5,
-            font_color="black",
-            font_size=6,
-            ax=ax,
-        )
+        # Draw each edge separately so its curvature is not selected by the
+        # edge key position in one shared connectionstyle list.
+        for edge_index, (source, target, key, attrs) in enumerate(edge_data):
+            edge = (source, target, key)
+            connectionstyle = f"arc3,rad={edge_curvatures[edge]}"
+            nx.draw_networkx_edges(
+                G,
+                pos,
+                edgelist=[edge],
+                edge_color=edge_outline_colors[edge_index],
+                width=edge_outline_widths[edge_index],
+                style="dashed" if target == self.fail_state else "solid",
+                connectionstyle=connectionstyle,
+                arrows=True,
+                arrowsize=14,
+                ax=ax,
+            )
+            destination, budget = attrs[edge_label]
+            budget_text = (
+                f"{budget:g}" if isinstance(budget, (int, float)) else str(budget)
+            )
+            label = f"a=({destination}, {budget_text})"
+            label_bbox = {
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.8,
+                "pad": 0.2,
+            }
+            if source == target:
+                label_offset = 0.18 * y_span
+                if target == self.fail_state:
+                    label_offset *= -1
+                ax.text(
+                    pos[source][0],
+                    pos[source][1] + label_offset,
+                    label,
+                    ha="center",
+                    va="center",
+                    fontsize=6,
+                    color="black",
+                    bbox=label_bbox,
+                    zorder=3,
+                )
+            else:
+                edge_length = np.linalg.norm(
+                    np.asarray(pos[target]) - np.asarray(pos[source])
+                )
+                label_pos = 0.36 if edge_length < 0.25 * x_span else 0.5
+                nx.draw_networkx_edge_labels(
+                    G,
+                    pos,
+                    {edge: label},
+                    connectionstyle=connectionstyle,
+                    label_pos=label_pos,
+                    font_color="black",
+                    font_size=6,
+                    bbox=label_bbox,
+                    ax=ax,
+                )
 
         # image formatting
         handles = [
@@ -508,9 +652,16 @@ class ProjectMDP(Env):
             ),
         ]
 
-        plt.legend(handles=handles, fontsize=8)
-        plt.box(False)
-        plt.tight_layout()
+        ax.legend(
+            handles=handles,
+            fontsize=8,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+            frameon=True,
+        )
+        ax.set_axis_off()
+        ax.figure.subplots_adjust(left=0.03, right=0.76, top=0.97, bottom=0.03)
 
     def _fig_to_array(self, fig: Figure) -> NDArray:
         """

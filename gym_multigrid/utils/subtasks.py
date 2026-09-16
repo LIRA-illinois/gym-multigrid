@@ -84,11 +84,18 @@ class SubtaskData:
 
 @dataclass(frozen=True)
 class NavigationTaskData:
-    """Concrete navigation task selected by a high-level destination state."""
+    """Concrete navigation task selected by a directed HL transition."""
 
-    state: int
+    from_state: int
+    to_state: int
     goal_positions: tuple[Position, ...]
     init_state_dist: PositionDist
+    task_id: str | None = None
+
+    @property
+    def state(self) -> int:
+        """Destination-state alias for older callers."""
+        return self.to_state
 
     def __post_init__(self) -> None:
         if len(self.goal_positions) == 0:
@@ -102,27 +109,56 @@ class NavigationTaskData:
 
 
 class NavigationTaskCatalog:
-    """Validated mapping from high-level destination states to navigation tasks."""
+    """Validated mapping from directed HL transitions to navigation tasks."""
 
-    def __init__(self, tasks: dict[int, NavigationTaskData]) -> None:
+    def __init__(self, tasks: dict[tuple[int, int], NavigationTaskData]) -> None:
         self._tasks = dict(tasks)
+        self._validate_successor_initial_states()
+
+    def _validate_successor_initial_states(self) -> None:
+        for predecessor in self._tasks.values():
+            successors = [
+                task
+                for task in self._tasks.values()
+                if task is not predecessor and task.from_state == predecessor.to_state
+            ]
+            for successor in successors:
+                expected_states = (predecessor.goal_positions,)
+                expected_probs = (1.0,)
+                if (
+                    successor.init_state_dist.states != expected_states
+                    or successor.init_state_dist.probs != expected_probs
+                ):
+                    raise ValueError(
+                        "Successor navigation task "
+                        f"{successor.from_state}->{successor.to_state} must start "
+                        "from the predecessor task's goal positions: "
+                        f"{predecessor.from_state}->{predecessor.to_state}."
+                    )
 
     @classmethod
     def from_configs(
         cls,
-        task_configs: list[dict[str, Any]] | dict[int, dict[str, Any]],
+        task_configs: list[dict[str, Any]] | dict[int, dict[str, Any]] | dict[str, Any],
         num_agents: int,
         width: int,
         height: int,
     ) -> "NavigationTaskCatalog":
-        configs = (
-            task_configs.values()
-            if isinstance(task_configs, dict)
-            else task_configs
-        )
-        tasks: dict[int, NavigationTaskData] = {}
+        if isinstance(task_configs, dict) and "tasks" in task_configs:
+            configs = task_configs["tasks"]
+        elif isinstance(task_configs, dict):
+            configs = task_configs.values()
+        else:
+            configs = task_configs
+
+        tasks: dict[tuple[int, int], NavigationTaskData] = {}
         for config in configs:
-            state = int(config["state"])
+            to_state = int(
+                config["to_state"] if "to_state" in config else config["state"]
+            )
+            from_state = int(
+                config["from_state"] if "from_state" in config else to_state
+            )
             goal_positions = tuple(
                 tuple(position) for position in config["goal_positions"]
             )
@@ -132,22 +168,22 @@ class NavigationTaskCatalog:
                 for joint_state in spawn_config["states"]
             )
             task = NavigationTaskData(
-                state=state,
+                from_state=from_state,
+                to_state=to_state,
                 goal_positions=goal_positions,
                 init_state_dist=PositionDist(
                     states=spawn_states,
                     probs=tuple(spawn_config["probs"]),
                 ),
+                task_id=config.get("id"),
             )
             if len(goal_positions) != num_agents:
                 raise ValueError(
-                    f"Navigation task {state} must define one goal per agent."
+                    f"Navigation task {from_state}->{to_state} must define one goal per agent."
                 )
-            if any(
-                len(joint_state) != num_agents for joint_state in spawn_states
-            ):
+            if any(len(joint_state) != num_agents for joint_state in spawn_states):
                 raise ValueError(
-                    f"Navigation task {state} must define one spawn per agent."
+                    f"Navigation task {from_state}->{to_state} must define one spawn per agent."
                 )
             for position in goal_positions + tuple(
                 position for joint_state in spawn_states for position in joint_state
@@ -155,18 +191,35 @@ class NavigationTaskCatalog:
                 x, y = position
                 if not (0 <= x < width and 0 <= y < height):
                     raise ValueError(
-                        f"Navigation task {state} contains out-of-bounds position {position}."
+                        f"Navigation task {from_state}->{to_state} contains out-of-bounds position {position}."
                     )
-            if state in tasks:
-                raise ValueError(f"Duplicate navigation task state: {state}")
-            tasks[state] = task
+            key = (from_state, to_state)
+            if key in tasks:
+                raise ValueError(f"Duplicate navigation task transition: {key}")
+            tasks[key] = task
         return cls(tasks)
 
-    def __contains__(self, state: int) -> bool:
-        return state in self._tasks
+    def __contains__(self, state_or_transition: int | tuple[int, int]) -> bool:
+        if isinstance(state_or_transition, tuple):
+            return state_or_transition in self._tasks
+        return any(to_state == state_or_transition for _, to_state in self._tasks)
 
-    def __getitem__(self, state: int) -> NavigationTaskData:
-        return self._tasks[state]
+    def __getitem__(
+        self, state_or_transition: int | tuple[int, int]
+    ) -> NavigationTaskData:
+        if isinstance(state_or_transition, tuple):
+            return self._tasks[state_or_transition]
+
+        matches = [
+            task
+            for _, task in self._tasks.items()
+            if task.to_state == state_or_transition
+        ]
+        if len(matches) != 1:
+            raise KeyError(
+                f"Destination state {state_or_transition} is ambiguous; provide (from_state, to_state)."
+            )
+        return matches[0]
 
     def __bool__(self) -> bool:
         return bool(self._tasks)
@@ -174,15 +227,35 @@ class NavigationTaskCatalog:
     def __iter__(self):
         return iter(self._tasks)
 
+    def task_for(self, from_state: int, to_state: int) -> NavigationTaskData:
+        task = self._tasks.get((from_state, to_state))
+        if task is not None:
+            return task
+
+        matches = [task for _, task in self._tasks.items() if task.to_state == to_state]
+        if len(matches) == 1:
+            return matches[0]
+        raise KeyError(f"No navigation task configured for {from_state}->{to_state}.")
+
+    def first_transition(self, from_state: int | None = None) -> tuple[int, int]:
+        transitions = sorted(self._tasks)
+        if from_state is not None:
+            transitions = [
+                transition for transition in transitions if transition[0] == from_state
+            ]
+        if not transitions:
+            raise KeyError(f"No navigation task configured from {from_state}.")
+        return transitions[0]
+
     def first_state(self) -> int:
         if not self._tasks:
             raise ValueError("Navigation task catalog is empty.")
-        return min(self._tasks)
+        return min(task.to_state for task in self._tasks.values())
 
     def last_state(self) -> int:
         if not self._tasks:
             raise ValueError("Navigation task catalog is empty.")
-        return max(self._tasks)
+        return max(task.to_state for task in self._tasks.values())
 
 
 @dataclass

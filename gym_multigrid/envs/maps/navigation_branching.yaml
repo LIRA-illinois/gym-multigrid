@@ -1,0 +1,59 @@
+# Shared configuration for ProjectMDP and TeamNavigationEnv.
+# Use with a team-nav-v0 environment and navigation_config pointing here.
+mdp:
+  initial_state: 0
+  states: [0, 1, 2, 3, 4]
+  # New post-goal state (4) has been added and is the new goal state.
+  goal_states: [4]
+  transitions:
+    - { from_state: 0, to_state: 1 }
+    - { from_state: 0, to_state: 2 }
+    - { from_state: 1, to_state: 3 }
+    - { from_state: 2, to_state: 3 }
+    - { from_state: 3, to_state: 4 }
+
+tasks:
+  # Continuity constraint: for every edge A -> B, B's init_state_dist must
+  # contain exactly one joint state, equal to A's goal_positions, with prob 1.
+  - id: 0_to_1
+    from_state: 0
+    to_state: 1
+    goal_positions: [[1, 6], [7, 6], [4, 5]]
+    init_state_dist:
+      states: [[[2, 2], [3, 2], [4, 2]]]
+      probs: [1.0]
+
+  - id: 0_to_2
+    from_state: 0
+    to_state: 2
+    goal_positions: [[5, 1], [6, 3], [2, 5]]
+    init_state_dist:
+      states: [[[2, 2], [3, 2], [4, 2]]]
+      probs: [1.0]
+
+  - id: 1_to_3
+    from_state: 1
+    to_state: 3
+    goal_positions: [[1, 1], [7, 1], [4, 7]]
+    init_state_dist:
+      states: [[[1, 6], [7, 6], [4, 5]]]
+      probs: [1.0]
+
+  - id: 2_to_3
+    from_state: 2
+    to_state: 3
+    goal_positions: [[1, 1], [7, 1], [4, 7]]
+    init_state_dist:
+      states: [[[5, 1], [6, 3], [2, 5]]]
+      probs: [1.0]
+
+  - id: 3_to_4
+    from_state: 3
+    to_state: 4
+    # The init_state_dist for 3->4 must match the predecessors' goal_positions
+    # (continuity invariant). Those are [[1,1],[7,1],[4,7]] from the tasks
+    # that lead into state 3.
+    goal_positions: [[1, 2], [7, 2], [4, 6]]
+    init_state_dist:
+      states: [[[1, 1], [7, 1], [4, 7]]]
+      probs: [1.0]
