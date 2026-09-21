@@ -1,8 +1,6 @@
 from ast import literal_eval
 from collections import defaultdict
-from copy import copy
 from itertools import combinations, product
-from math import prod
 from os.path import dirname, join
 from typing import Any, Literal, Optional
 from warnings import warn
@@ -11,7 +9,7 @@ from warnings import warn
 import numpy as np
 import pandas as pd
 import yaml
-from cv2 import INTER_CUBIC, putText, resize
+from cv2 import INTER_NEAREST, putText, resize
 
 # from gurobipy import GRB
 from gymnasium import spaces
@@ -185,6 +183,11 @@ class TeamNavigationEnv(MultiGridEnv):
                     },
                 }
 
+            self._possible_actions = tuple(
+                self.trans[action]["possible_action"] for action in actions
+            )
+            self._action_probs = tuple(self.trans[action]["prob"] for action in actions)
+
         def get_stochastic_action(self, action: int, np_random: Generator) -> int:
             # handles environment randomness as it affects the agent's actual movement
             # for internal env use only
@@ -192,7 +195,7 @@ class TeamNavigationEnv(MultiGridEnv):
             # in this case, we replace "UP" with "RIGHT" when doing move_agent() and other internal step() methods
             return int(
                 np_random.choice(
-                    self.trans[action]["possible_action"], p=self.trans[action]["prob"]
+                    self._possible_actions[action], p=self._action_probs[action]
                 )
             )
 
@@ -202,15 +205,11 @@ class TeamNavigationEnv(MultiGridEnv):
         width: Optional[int] = 10,
         height: Optional[int] = 10,
         n_agents: int = 4,
-        sight: int = 2,
         state_type: Literal[
-            "multigrid_flattened", "simple_navigation_features"
+            "simple_navigation_features"
         ] = "simple_navigation_features",
-        obs_type: Literal[
-            "multigrid_flattened", "simple_navigation_features"
-        ] = "simple_navigation_features",
+        obs_type: Literal["simple_navigation_features"] = "simple_navigation_features",
         goal_type: Literal["simultaneous_arrival"] | None = None,
-        observe_other_agents: bool = True,
         chosen_move_prob: float = 1.0,
         agent_0_delay_prob: float = 0.0,
         highlight_visible_cells: bool = False,
@@ -283,20 +282,11 @@ class TeamNavigationEnv(MultiGridEnv):
         # obs options for this specific env
         self.state_type = state_type
         self.env_obs_type = obs_type
-        match self.env_obs_type:
-            # in both cases, sight is like the "radius" of the square obs centered on the agent
-            # this is here b/c multigrid and the original LBF obs handle it a little differently
-            case "multigrid_flattened":
-                agent_view_size = 2 * sight + 1
-                self.observe_other_agents = observe_other_agents
-            case "simple_navigation_features":
-                agent_view_size = None
-            case _:
-                raise NotImplementedError(
-                    f"Observation type {obs_type!r} is not implemented."
-                )
+        if self.env_obs_type != "simple_navigation_features":
+            raise NotImplementedError(
+                f"Observation type {obs_type!r} is not implemented."
+            )
 
-        # if observe_other_agents=False, agents cannot see the other agents and those cells replaced with empty spaces
         self._spawn_attempts: int = 1000
 
         # initial encoding for objects in the observation
@@ -319,7 +309,6 @@ class TeamNavigationEnv(MultiGridEnv):
             LBFAgent(
                 world=self.world,
                 index=i,
-                view_size=agent_view_size,
             )
             for i in range(self.num_agents)
         ]
@@ -335,7 +324,6 @@ class TeamNavigationEnv(MultiGridEnv):
             else AlternativeNavigationActions,
             render_mode="rgb_array",
             obs_type="symmetrical",
-            agent_view_size=agent_view_size,
             highlight_visible_cells=highlight_visible_cells,
         )
 
@@ -346,6 +334,11 @@ class TeamNavigationEnv(MultiGridEnv):
         self.transition_prob = self.TransitionProbs(
             chosen_move_prob, actions=self.actions
         )
+
+        self._coordinate_scale = np.array(
+            [max(self.width - 2, 1), max(self.height - 2, 1)], dtype=np.float32
+        )
+        self._observation_coordinate_scale = np.tile(self._coordinate_scale, 2)
 
         self.active_task_state = 0
 
@@ -562,7 +555,7 @@ class TeamNavigationEnv(MultiGridEnv):
             self.place_object(goal, pos=goal_position)
             if hasattr(self, "init_grid"):
                 self.init_grid.set(*goal_position, goal)
-            agent.room_goals = {to_state: np.asarray([goal_position], dtype=np.int_)}
+            agent.task_goals = {to_state: np.asarray([goal_position], dtype=np.int_)}
             self.room_despawn_objects[to_state].append(goal)
 
     def _spawn_navigation_agents(self, from_state: int, to_state: int) -> None:
@@ -741,8 +734,8 @@ class TeamNavigationEnv(MultiGridEnv):
             prev_room = start_task - 1
 
         for agent in self.agents:
-            if prev_room in agent.room_goals and len(agent.room_goals[prev_room]) > 0:
-                goal_pos = tuple(agent.room_goals[prev_room][0])
+            if prev_room in agent.task_goals and len(agent.task_goals[prev_room]) > 0:
+                goal_pos = tuple(agent.task_goals[prev_room][0])
                 try:
                     if agent.pos is not None:
                         self.despawn_object(agent)
@@ -881,8 +874,8 @@ class TeamNavigationEnv(MultiGridEnv):
         for a in self.agents:
             a.reward = 0.0
 
-        actions: list[int] = np.array(action).flatten().astype(np.int_).tolist()
-        next_positions = defaultdict(list)
+        actions: list[int] = np.asarray(action, dtype=np.int_).reshape(-1).tolist()
+        next_positions: dict[Position, tuple[int, LBFAgent]] = {}
 
         # check if actions are valid, replace with STAY if not valid
         for agent, action in zip(self.agents, actions):
@@ -895,14 +888,15 @@ class TeamNavigationEnv(MultiGridEnv):
                 self.np_random,
             )
 
-            # check if the action is valid
-            valid_actions = self._get_valid_actions(agent)
-
-            if action not in valid_actions:
+            next_pos = self._get_next_pos(agent, action)
+            if action != self.actions.STAY and not self._check_valid_pos(next_pos):
                 action = self.actions.STAY
-
-            next_pos: tuple[int, int] = self._get_next_pos(agent, action)
-            next_positions[next_pos].append(agent)
+                next_pos = agent.pos
+            if next_pos in next_positions:
+                collision_count, first_agent = next_positions[next_pos]
+                next_positions[next_pos] = (collision_count + 1, first_agent)
+            else:
+                next_positions[next_pos] = (1, agent)
 
         # move agents
         self._move_agents(next_positions)
@@ -938,7 +932,7 @@ class TeamNavigationEnv(MultiGridEnv):
         # for agent in self._detected_agents:
         #     agent.reward += self.reward_config.detection_penalty
 
-        agent_rewards = float(np.sum([a.reward for a in self.agents]))
+        agent_rewards = float(sum(a.reward for a in self.agents))
         reward += agent_rewards
 
         info = self._get_info(task_completed=task_completed)
@@ -1066,21 +1060,21 @@ class TeamNavigationEnv(MultiGridEnv):
 
         return 0.0
 
-    def _move_agents(self, next_positions: dict[Position, list]) -> None:
+    def _move_agents(
+        self, next_positions: dict[Position, tuple[int, LBFAgent]]
+    ) -> None:
         # if two or more agents try to move to the same position they all fail and stay at their current position
-        for next_pos, agents in next_positions.items():
+        for next_pos, (collision_count, agent) in next_positions.items():
             # make sure only one agent will arrive at the cell
-            if len(agents) == 1 and self._check_valid_pos(next_pos):
+            if collision_count == 1 and self._check_valid_pos(next_pos):
                 # do movements for non colliding players
-                agent = agents[0]
-
                 # Move agent
                 agent.move(
                     next_pos=next_pos,
                     grid=self.grid,
                     init_grid=self.init_grid,
                     current_task=self.current_task,
-                    t=copy(self._t),
+                    t=self._t,
                 )
 
     def _update_task(self) -> bool:
@@ -1103,33 +1097,31 @@ class TeamNavigationEnv(MultiGridEnv):
         #     self.current_task += 1
 
     def _get_next_pos(self, agent: LBFAgent, action: int) -> tuple[int, int]:
+        x, y = agent.pos
         match action:
             case self.actions.STAY:
-                next_pos = agent.pos
+                return x, y
 
             case self.actions.LEFT:
-                next_pos = agent.west_pos(in_tuple=True)
+                return x - 1, y
 
             case self.actions.RIGHT:
-                next_pos = agent.east_pos(in_tuple=True)
+                return x + 1, y
 
             case self.actions.UP:
-                next_pos = agent.north_pos(in_tuple=True)
+                return x, y - 1
 
             case self.actions.DOWN:
-                next_pos = agent.south_pos(in_tuple=True)
+                return x, y + 1
 
-        # convert from np ints to ints
-        if isinstance(next_pos[0], np.int_):
-            next_pos = tuple(map(int, next_pos))
-        return next_pos
+        raise ValueError(f"Unknown navigation action: {action}")
 
     def _terminated(self, task_completed: bool) -> bool:
         # episode can terminate for different reasons
         # task was completed
         # all agents reached the goals (absorbing states), so they can't do anything else and the episode is essentially over
         if task_completed or all(
-            [agent.in_goal_set(self.current_task) for agent in self.agents]
+            agent.in_goal_set(self.current_task) for agent in self.agents
         ):
             return True
 
@@ -1194,20 +1186,6 @@ class TeamNavigationEnv(MultiGridEnv):
                     )
                 )
 
-            case "multigrid_flattened":
-                # NOTE: compared to original, currently does NOT have the coordinates of other objects in the ego agent's frame, so that could reduce training performance
-                state = self.grid.encode()
-                state = state.flatten()
-
-                if self.goal_type == "simultaneous_arrival":
-                    first_hit_times = np.array(
-                        [
-                            self._get_first_hit_time_obs(agent.index)
-                            for agent in self.agents
-                        ]
-                    )
-                    state = np.concatenate([state, first_hit_times.flatten()])
-
             case _:
                 raise NotImplementedError
 
@@ -1218,17 +1196,7 @@ class TeamNavigationEnv(MultiGridEnv):
     def _get_state_size(self) -> int:
         """standard function to interface with EPyMARL training loop,
         returns the flattened size of the global state."""
-        match self.state_type:
-            case "multigrid_flattened":
-                state_size = prod(self.state.shape)
-
-            case "simple_navigation_features":
-                state_size = self.state.shape[0]
-
-            case _:
-                raise NotImplementedError
-
-        return state_size
+        return self.state.shape[0]
 
     # obs
     @property
@@ -1241,44 +1209,39 @@ class TeamNavigationEnv(MultiGridEnv):
             obs of size (num_agents, num_obs_features
 
         """
-        # return an obs of size (num_agents, num_obs_features)
-        # use multigrid's basic obs for now, come back to this later
-        match self.env_obs_type:
-            case "simple_navigation_features":
-                obs = np.vstack(
-                    [self._get_navigation_features(i) for i in range(self.num_agents)]
-                )
+        obs = np.empty((self.num_agents, 5), dtype=np.float32)
+        for i, agent in enumerate(self.agents):
+            agent_x, agent_y = agent.pos
+            obs[i, 0] = agent_x / self._coordinate_scale[0]
+            obs[i, 1] = agent_y / self._coordinate_scale[1]
 
-            case "multigrid_flattened":
-                # one issues w/ this obs is that agents can see when goals disappear (i.e., by another agent reaching it), so that leaks some information that I don't want the agents to have
-                # I need to force them to rely on comms to solve this task, and if they don't have to use comms, they won't
-                obs_list = self.gen_obs(
-                    observe_other_agents=self.observe_other_agents,
-                )
+            goal_positions = agent.task_goals.get(self.current_task)
+            if goal_positions is None or len(goal_positions) == 0:
+                obs[i, 2:4] = 0.0
+            else:
+                goal_x, goal_y = goal_positions[0]
+                obs[i, 2] = goal_x / self._coordinate_scale[0]
+                obs[i, 3] = goal_y / self._coordinate_scale[1]
 
-                for i, obs in enumerate(obs_list):
-                    obs = obs.flatten()
-
-                    # add scaled first hit times to the obs
-                    # adding this here b/c multigrid doesn't easily support changing an object's encoding dimension
-                    if self.goal_type == "simultaneous_arrival":
-                        obs = np.concatenate([obs, self._get_first_hit_time_obs(i)])
-                    obs_list[i] = obs
-
-                obs = np.vstack(obs_list)
-
-            case _:
-                raise NotImplementedError
+        obs[:, 4] = self._delayed_agents
         return obs
 
     def _get_navigation_features(self, agent_idx: int) -> NDArray[np.float32]:
-        return np.concatenate(
-            (
-                self._get_navigation_agent_features(agent_idx),
-                self._get_navigation_goal_positions(agent_idx),
-                np.array([self._delayed_agents[agent_idx]], dtype=np.float32),
-            )
-        ).astype(np.float32)
+        features = np.empty(5, dtype=np.float32)
+        agent_x, agent_y = self.agents[agent_idx].pos
+        features[0] = agent_x / self._coordinate_scale[0]
+        features[1] = agent_y / self._coordinate_scale[1]
+
+        goal_positions = self.agents[agent_idx].task_goals.get(self.current_task)
+        if goal_positions is None or len(goal_positions) == 0:
+            features[2:4] = 0.0
+        else:
+            goal_x, goal_y = goal_positions[0]
+            features[2] = goal_x / self._coordinate_scale[0]
+            features[3] = goal_y / self._coordinate_scale[1]
+
+        features[4] = self._delayed_agents[agent_idx]
+        return features
 
     def _sample_agent_delays(self) -> None:
         self._delayed_agents.fill(False)
@@ -1286,10 +1249,14 @@ class TeamNavigationEnv(MultiGridEnv):
             self._delayed_agents[0] = self.np_random.random() < self.agent_0_delay_prob
 
     def _get_navigation_agent_features(self, agent_idx: int) -> NDArray[np.float32]:
-        coordinate_scale = self._get_navigation_coordinate_scale()
-        agent_position = np.asarray(self.agents[agent_idx].pos, dtype=np.float32)
-        agent_position = agent_position / coordinate_scale
-        return agent_position
+        agent_x, agent_y = self.agents[agent_idx].pos
+        return np.array(
+            [
+                agent_x / self._coordinate_scale[0],
+                agent_y / self._coordinate_scale[1],
+            ],
+            dtype=np.float32,
+        )
 
         """
         hit_time = self.agents[agent_idx].t_first_hit_goal
@@ -1309,14 +1276,17 @@ class TeamNavigationEnv(MultiGridEnv):
         """
 
     def _get_navigation_goal_positions(self, agent_idx: int) -> NDArray[np.float32]:
-        coordinate_scale = self._get_navigation_coordinate_scale()
-        goal_positions = np.asarray(
-            self.agents[agent_idx].room_goals.get(self.current_task, []),
-            dtype=np.float32,
-        ).reshape(-1, 2)
-        if len(goal_positions) == 0:
+        goal_positions = self.agents[agent_idx].task_goals.get(self.current_task)
+        if goal_positions is None or len(goal_positions) == 0:
             return np.zeros(2, dtype=np.float32)
-        return goal_positions[0] / coordinate_scale
+        goal_x, goal_y = goal_positions[0]
+        return np.array(
+            [
+                goal_x / self._coordinate_scale[0],
+                goal_y / self._coordinate_scale[1],
+            ],
+            dtype=np.float32,
+        )
 
     def _get_elapsed_time_obs(self) -> NDArray[np.float32]:
         return np.array(
@@ -1325,70 +1295,19 @@ class TeamNavigationEnv(MultiGridEnv):
 
     def _get_navigation_coordinate_scale(self) -> NDArray[np.float32]:
         """Scale coordinates against the walkable inner grid dimensions."""
-        return np.array(
-            [max(self.width - 2, 1), max(self.height - 2, 1)], dtype=np.float32
-        )
-
-    # obs helpers
-    def _get_first_hit_time_obs(self, agent_idx: int):
-        if self.agents[agent_idx].t_first_hit_goal > -1:
-            first_hit_time_obs = np.array(
-                [self.agents[agent_idx].t_first_hit_goal / self._episode_limit]
-            )
-        else:
-            first_hit_time_obs = np.array([self.agents[agent_idx].t_first_hit_goal])
-
-        return first_hit_time_obs
+        return self._coordinate_scale
 
     def _get_obs_size(self) -> int:
         """standard function to interface with EPyMARL training loop, returns the flattened size of a single agent's observation."""
-        match self.env_obs_type:
-            case "multigrid_flattened":
-                obs_size: int = self.observation_space.shape[1]
-
-                if self.goal_type == "simultaneous_arrival":
-                    # for the first hitting time
-                    obs_size += 1
-
-            case "simple_navigation_features":
-                obs_size = self.observation_space.shape[1]
-
-            case _:
-                raise NotImplementedError
-
-        return obs_size
+        return self.observation_space.shape[1]
 
     def _set_observation_space(self) -> spaces.Space:
-        match self.env_obs_type:
-            case "multigrid_flattened":
-                # agent obs is a square with radius of self.view_size centered on the agent
-                team_obs_space = spaces.Box(
-                    low=0,
-                    high=255,
-                    shape=(
-                        self.num_agents,
-                        self.world.encode_dim
-                        * self.agent_view_size
-                        * self.agent_view_size,
-                    ),
-                    dtype=np.int_,
-                )
-
-            case "simple_navigation_features":
-                team_obs_space = spaces.Box(
-                    low=0.0,
-                    high=1.0,
-                    shape=(
-                        self.num_agents,
-                        5,
-                    ),
-                    dtype=np.float32,
-                )
-
-            case _:
-                raise NotImplementedError
-
-        return team_obs_space
+        return spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=(self.num_agents, 5),
+            dtype=np.float32,
+        )
 
     # actions
     @property
@@ -1454,9 +1373,15 @@ class TeamNavigationEnv(MultiGridEnv):
             self._pre_step_actions = self._pre_step_actions.flatten()
 
         action_panel_height = (len(self._pre_step_actions) + 3) * line_height
-        info_img = 255 * np.ones(
-            (action_panel_height, sidebar_width, 3), dtype=img.dtype
-        )
+        info_shape = (action_panel_height, sidebar_width, 3)
+        if (
+            not hasattr(self, "_render_info_img")
+            or self._render_info_img.shape != info_shape
+            or self._render_info_img.dtype != img.dtype
+        ):
+            self._render_info_img = np.empty(info_shape, dtype=img.dtype)
+        info_img = self._render_info_img
+        info_img.fill(255)
 
         # header with basic info
         time_header = f"t : {self._t_render}"
@@ -1481,21 +1406,33 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # place observations directly below the action summary in the sidebar
         observation_img = self._render_agent_observations(sidebar_width)
-        sidebar = np.concatenate([info_img, observation_img], axis=0)
-        if img.shape[0] < sidebar.shape[0]:
-            padded_img = 255 * np.ones(
-                (sidebar.shape[0], img.shape[1], img.shape[2]), dtype=img.dtype
-            )
-            padded_img[: img.shape[0]] = img
-            img = padded_img
-        elif sidebar.shape[0] < img.shape[0]:
-            padded_sidebar = 255 * np.ones(
-                (img.shape[0], sidebar.shape[1], sidebar.shape[2]),
-                dtype=sidebar.dtype,
-            )
-            padded_sidebar[: sidebar.shape[0]] = sidebar
-            sidebar = padded_sidebar
-        img = np.concatenate([img, sidebar], axis=1)
+        sidebar_shape = (
+            info_img.shape[0] + observation_img.shape[0],
+            sidebar_width,
+            3,
+        )
+        if (
+            not hasattr(self, "_render_sidebar")
+            or self._render_sidebar.shape != sidebar_shape
+        ):
+            self._render_sidebar = np.empty(sidebar_shape, dtype=img.dtype)
+        sidebar = self._render_sidebar
+        sidebar[: info_img.shape[0]] = info_img
+        sidebar[info_img.shape[0] :] = observation_img
+        canvas_height = max(img.shape[0], sidebar.shape[0])
+        canvas_width = img.shape[1] + sidebar.shape[1]
+        canvas_shape = (canvas_height, canvas_width, img.shape[2])
+        if (
+            not hasattr(self, "_render_canvas")
+            or self._render_canvas.shape != canvas_shape
+            or self._render_canvas.dtype != img.dtype
+        ):
+            self._render_canvas = np.empty(canvas_shape, dtype=img.dtype)
+        canvas = self._render_canvas
+        canvas.fill(255)
+        canvas[: img.shape[0], : img.shape[1]] = img
+        canvas[: sidebar.shape[0], img.shape[1] :] = sidebar
+        img = canvas
 
         # upscale until at least 360p
         upscale_mult = 1
@@ -1509,75 +1446,25 @@ class TeamNavigationEnv(MultiGridEnv):
             img.shape[1] * upscale_mult,
             img.shape[0] * upscale_mult,
         )
-        img = resize(img, new_dims, interpolation=INTER_CUBIC)
+        img = resize(img, new_dims, interpolation=INTER_NEAREST)
 
         return img
 
     def _render_agent_observations(self, width: int) -> NDArray[np.uint8]:
         """Render the information available to each agent."""
-        if self.env_obs_type == "multigrid_flattened":
-            grids, _ = self.gen_obs_grid()
-            view_size = self.agent_view_size or grids[0].width
-            margin = 8
-            tile_size = max(
-                8,
-                min(
-                    self.tile_size // 2,
-                    max(
-                        (width - (self.num_agents + 1) * margin)
-                        // (self.num_agents * view_size),
-                        8,
-                    ),
-                ),
-            )
-            local_images = []
-            observe_other_agents = getattr(self, "observe_other_agents", True)
-            for agent, grid in zip(self.agents, grids):
-                if not observe_other_agents:
-                    center = (grid.width // 2, grid.height // 2)
-                    for x in range(grid.width):
-                        for y in range(grid.height):
-                            obj = grid.get(x, y)
-                            if (
-                                obj is not None
-                                and obj.type == "agent"
-                                and (x, y) != center
-                            ):
-                                grid.set(x, y, None)
-                local_images.append(grid.render(tile_size))
-
-            line_height = int(self.tile_size * 0.5)
-            header_height = 2 * self.tile_size
-            panel_height = header_height + max(image.shape[0] for image in local_images)
-            panel = 255 * np.ones((panel_height, width, 3), dtype=np.uint8)
-            putText(
-                panel,
-                "Agent observations (local view)",
-                (5, self.tile_size),
-                **HEADER_TEXT_CONFIG,
-            )
-            y_offset = header_height
-            for index, local_image in enumerate(local_images):
-                x_offset = margin + index * (local_image.shape[1] + margin)
-                putText(
-                    panel,
-                    f"Agent {index}",
-                    (x_offset, y_offset - 2),
-                    **RENDER_TEXT_CONFIG,
-                )
-                panel[
-                    y_offset : y_offset + local_image.shape[0],
-                    x_offset : x_offset + local_image.shape[1],
-                ] = local_image
-            return panel
-
         observations = np.asarray(self.obs)
-        coordinate_scale = self._get_navigation_coordinate_scale()
         component_labels = ["agent_x", "agent_y", "goal_x", "goal_y", "delay"]
         line_height = int(self.tile_size * 0.5)
         header_height = 2 * self.tile_size
         panel_height = header_height + (len(component_labels) + 1) * line_height
-        panel = 255 * np.ones((panel_height, width, 3), dtype=np.uint8)
+        panel_shape = (panel_height, width, 3)
+        if (
+            not hasattr(self, "_render_observation_panel")
+            or self._render_observation_panel.shape != panel_shape
+        ):
+            self._render_observation_panel = np.empty(panel_shape, dtype=np.uint8)
+        panel = self._render_observation_panel
+        panel.fill(255)
 
         putText(
             panel,
@@ -1596,11 +1483,11 @@ class TeamNavigationEnv(MultiGridEnv):
                 (x_offset, y_text),
                 **RENDER_TEXT_CONFIG,
             )
-            display_observation = observation.copy()
-            display_observation[:-1] = display_observation[:-1] * np.tile(
-                coordinate_scale, 2
-            )
-            for label, value in zip(component_labels, display_observation):
+            for feature_index, (label, value) in enumerate(
+                zip(component_labels, observation)
+            ):
+                if feature_index < 4:
+                    value *= self._coordinate_scale[feature_index % 2]
                 y_text += line_height
                 rendered_value = (
                     "ON"
