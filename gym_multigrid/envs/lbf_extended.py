@@ -1841,9 +1841,9 @@ class LBFExtendedEnv(MultiGridEnv):
         # append info image to the right of env image
         img = np.concatenate([img, info_img], axis=1)
 
-        # upscale until at least 360p
+        # upscale until at least 720p
         upscale_mult = 1
-        min_target_dims = (360, 640)
+        min_target_dims = (720, 1280)
         while (upscale_mult * img.shape[0] < min_target_dims[0]) or (
             upscale_mult * img.shape[1] < min_target_dims[1]
         ):
@@ -1855,7 +1855,6 @@ class LBFExtendedEnv(MultiGridEnv):
         )
         img = resize(img, new_dims, interpolation=INTER_CUBIC)
 
-        "example text is here, this is my example text"
         return img
 
     @property

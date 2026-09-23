@@ -23,5 +23,5 @@ Hierarchical team navigation can load a YAML file through the `navigation_config
 environment argument. The file may define an arbitrary directed task graph under
 `mdp.transitions` and one navigation task per directed edge under `tasks`.
 Each task uses `from_state`, `to_state`, one goal position per agent, and an
-`init_state_dist`. See `gym_multigrid/envs/maps/navigation_branching.yaml` for a
+`init_state_dist`. See `gym_multigrid/envs/maps/team_navigation/navigation_branching.yaml` for a
 branching example where two tasks merge into a final state.

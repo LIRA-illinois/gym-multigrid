@@ -305,6 +305,7 @@ class TeamNavigationEnv(MultiGridEnv):
             else AlternativeNavigationActions,
             render_mode="rgb_array",
             obs_type="symmetrical",
+            tile_size=32,
             highlight_visible_cells=highlight_visible_cells,
         )
 
@@ -1186,6 +1187,7 @@ class TeamNavigationEnv(MultiGridEnv):
     # rendering
     def render(self):
         img = super().render()
+        env_width = img.shape[1]
 
         # render actions in a separate image that we then append to base env image
         # determine info image width and create a blank white image
@@ -1208,27 +1210,7 @@ class TeamNavigationEnv(MultiGridEnv):
         info_img = self._render_info_img
         info_img.fill(255)
 
-        # header with basic info
-        time_header = f"t : {self._t_render}"
-        y_text = line_height
-        putText(info_img, time_header, (x_text, y_text), **HEADER_TEXT_CONFIG)
-
-        # draw each agent's action as text stacked vertically
-        # extra spacing between different sections of text
-        y_text += line_height
-        action_header = "Agent : Pre-step action"
-        putText(info_img, action_header, (x_text, y_text), **HEADER_TEXT_CONFIG)
-
         # start_y set below header to avoid overlap
-        for i, action in enumerate(self._pre_step_actions):
-            # convert from int to action name if not none
-            if action is not None:
-                action = self.actions(action).name.title()
-
-            text = f"{i} : {action}"
-            y_text += line_height
-            putText(info_img, text, (x_text, y_text), **RENDER_TEXT_CONFIG)
-
         # place observations directly below the action summary in the sidebar
         observation_img = self._render_agent_observations(sidebar_width)
         sidebar_shape = (
@@ -1259,9 +1241,9 @@ class TeamNavigationEnv(MultiGridEnv):
         canvas[: sidebar.shape[0], img.shape[1] :] = sidebar
         img = canvas
 
-        # upscale until at least 360p
+        # upscale until at least 480p
         upscale_mult = 1
-        min_target_dims = (360, 640)
+        min_target_dims = (480, 854)
         while (upscale_mult * img.shape[0] < min_target_dims[0]) or (
             upscale_mult * img.shape[1] < min_target_dims[1]
         ):
@@ -1273,11 +1255,25 @@ class TeamNavigationEnv(MultiGridEnv):
         )
         img = resize(img, new_dims, interpolation=INTER_NEAREST)
 
+        # Draw text after upscaling so glyphs are rasterized at the output
+        # resolution instead of being enlarged from the 32-pixel base canvas.
+        self._render_sidebar_text(
+            img,
+            origin=(env_width * upscale_mult, 0),
+            scale=upscale_mult,
+            line_height=line_height,
+        )
+        self._render_agent_observations_text(
+            img,
+            origin=(env_width * upscale_mult, action_panel_height * upscale_mult),
+            width=sidebar_width,
+            scale=upscale_mult,
+        )
+
         return img
 
     def _render_agent_observations(self, width: int) -> NDArray[np.uint8]:
-        """Render the information available to each agent."""
-        observations = np.asarray(self.obs)
+        """Create the background for the agent observation panel."""
         component_labels = ["agent_x", "agent_y", "goal_x", "goal_y", "delay"]
         line_height = int(self.tile_size * 0.5)
         header_height = 2 * self.tile_size
@@ -1291,22 +1287,95 @@ class TeamNavigationEnv(MultiGridEnv):
         panel = self._render_observation_panel
         panel.fill(255)
 
+        return panel
+
+    def _put_scaled_text(
+        self,
+        img: NDArray[np.uint8],
+        text: str,
+        position: tuple[int, int],
+        scale: int,
+        header: bool = False,
+    ) -> None:
+        config = (HEADER_TEXT_CONFIG if header else RENDER_TEXT_CONFIG).copy()
+        config["fontScale"] *= scale
+        config["thickness"] = max(1, config["thickness"] * scale)
         putText(
-            panel,
+            img,
+            text,
+            (position[0] * scale, position[1] * scale),
+            **config,
+        )
+
+    def _render_sidebar_text(
+        self,
+        img: NDArray[np.uint8],
+        origin: tuple[int, int],
+        scale: int,
+        line_height: int,
+    ) -> None:
+        x_text = 5
+        y_text = line_height
+        self._put_scaled_text(
+            img,
+            f"t : {self._t_render}",
+            (origin[0] // scale + x_text, origin[1] // scale + y_text),
+            scale,
+            header=True,
+        )
+
+        y_text += line_height
+        self._put_scaled_text(
+            img,
+            "Agent : Pre-step action",
+            (origin[0] // scale + x_text, origin[1] // scale + y_text),
+            scale,
+            header=True,
+        )
+
+        for i, action in enumerate(self._pre_step_actions):
+            if action is not None:
+                action = self.actions(action).name.title()
+            y_text += line_height
+            self._put_scaled_text(
+                img,
+                f"{i} : {action}",
+                (origin[0] // scale + x_text, origin[1] // scale + y_text),
+                scale,
+            )
+
+    def _render_agent_observations_text(
+        self,
+        img: NDArray[np.uint8],
+        origin: tuple[int, int],
+        width: int,
+        scale: int,
+    ) -> None:
+        """Render observation text directly at the final image resolution."""
+        observations = np.asarray(self.obs)
+        component_labels = ["agent_x", "agent_y", "goal_x", "goal_y", "delay"]
+        line_height = int(self.tile_size * 0.5)
+        header_height = 2 * self.tile_size
+        origin_x = origin[0] // scale
+        origin_y = origin[1] // scale
+
+        self._put_scaled_text(
+            img,
             "Agent observations (feature vectors)",
-            (5, self.tile_size),
-            **HEADER_TEXT_CONFIG,
+            (origin_x + 5, origin_y + self.tile_size),
+            scale,
+            header=True,
         )
 
         card_width = width // self.num_agents
         for index, observation in enumerate(observations):
             x_offset = index * card_width + 5
             y_text = header_height
-            putText(
-                panel,
+            self._put_scaled_text(
+                img,
                 f"Agent {index}",
-                (x_offset, y_text),
-                **RENDER_TEXT_CONFIG,
+                (origin_x + x_offset, origin_y + y_text),
+                scale,
             )
             for feature_index, (label, value) in enumerate(
                 zip(component_labels, observation)
@@ -1321,13 +1390,12 @@ class TeamNavigationEnv(MultiGridEnv):
                     if label == "delay"
                     else f"{value:.0f}"
                 )
-                putText(
-                    panel,
+                self._put_scaled_text(
+                    img,
                     f"{label}: {rendered_value}",
-                    (x_offset, y_text),
-                    **RENDER_TEXT_CONFIG,
+                    (origin_x + x_offset, origin_y + y_text),
+                    scale,
                 )
-        return panel
 
     @property
     def t_render(self) -> str:
