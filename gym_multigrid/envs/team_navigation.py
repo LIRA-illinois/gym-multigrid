@@ -1,19 +1,16 @@
 from ast import literal_eval
 from collections import defaultdict
+from collections.abc import Generator
 from itertools import combinations, product
 from os.path import dirname, join
 from typing import Any, Literal, Optional
 from warnings import warn
 
-# import gurobipy as gp
 import numpy as np
 import pandas as pd
 import yaml
 from cv2 import INTER_NEAREST, putText, resize
-
-# from gurobipy import GRB
 from gymnasium import spaces
-from numpy.random._generator import Generator
 from numpy.typing import NDArray
 
 from gym_multigrid.core.agent import (
@@ -75,10 +72,6 @@ class TeamNavigationEnv(MultiGridEnv):
             partial_arrival_penalty: float = -0.05,
         ) -> None:
             """
-            all signs for rewarding events assume to be handled in their definition since we only use the "+=" operator in the code below for simplicity and easier design
-            values are <=0 for "penalties" and >= 0 for "rewards"
-
-            Parameters
             ----------
             num_agents : int
             all_agents_reach_goal_proportion_per_agent : float, optional
@@ -99,8 +92,7 @@ class TeamNavigationEnv(MultiGridEnv):
             actions: AlternativeNavigationActions | SimpleNavigationActions,
         ) -> None:
             # define events that can happen (support) and their probabilities
-            # based on Gym "Frozen Lake" environment. If an agent intends to move in a direction, the env may cause them to move in that direction or in either perpendicular direction.
-            # define the base probability for each action here
+            # based on Frozen Lake-style stochastic movement.
             self._p_chosen_move = p_chosen_move
             self._slide_prob = (1 - p_chosen_move) / 2
 
@@ -221,12 +213,13 @@ class TeamNavigationEnv(MultiGridEnv):
         | dict[int, dict[str, Any]]
         | None = None,
         navigation_task_catalog: NavigationTaskCatalog | None = None,
+        hallway: bool | None = None,
     ) -> None:
         """
         Initialize the env.
         """
         self._map_name = map_name or ""
-        self.hallway = "_hall" in self._map_name
+        self.hallway = "_hall" in self._map_name if hallway is None else hallway
 
         self.num_agents = n_agents
         if not 0.0 <= agent_0_delay_prob <= 1.0:
@@ -239,17 +232,6 @@ class TeamNavigationEnv(MultiGridEnv):
         # only use episode_limit for internal class logic,
         # do NOT use for episode truncation (use standard gymnasium wrapper for that)
         self._episode_limit = episode_limit
-        self._time_scale = max((self._episode_limit or 1) - 1, 1)
-
-        """
-        if self.goal_type == "simultaneous_arrival":
-            # solve for the reward scaling to ensure it is in [0, 1]
-            # TODO check scratch.py for a n example implementation of this scaling
-            # you need to solve an optimization problem to find it, which is funny :P
-            self.max_reward_simultaneous_arrival = (
-                self._get_max_reward_simultaneous_arrival()
-            )
-        """
 
         # multi-room support
         self.field_map: pd.DataFrame | None = None
@@ -302,7 +284,6 @@ class TeamNavigationEnv(MultiGridEnv):
                 height=height,
             )
         self.navigation_task_catalog = navigation_task_catalog
-        self._configured_goal_positions = self._get_configured_goal_positions()
 
         # init agents
         agents = [
@@ -338,93 +319,8 @@ class TeamNavigationEnv(MultiGridEnv):
         self._coordinate_scale = np.array(
             [max(self.width - 2, 1), max(self.height - 2, 1)], dtype=np.float32
         )
-        self._observation_coordinate_scale = np.tile(self._coordinate_scale, 2)
 
         self.active_task_state = 0
-
-    def _get_configured_goal_positions(self) -> tuple[Position, ...]:
-        if self.navigation_task_catalog:
-            positions = {
-                tuple(position)
-                for transition in self.navigation_task_catalog
-                for position in self.navigation_task_catalog[transition].goal_positions
-            }
-            return tuple(sorted(positions))
-
-        if self.field_map is None:
-            return ()
-
-        positions = []
-        for y, row in self.field_map.iterrows():
-            for x, cell in row.items():
-                if (isinstance(cell, str) and cell == "g") or (
-                    isinstance(cell, tuple) and cell[0] == "g"
-                ):
-                    positions.append((x, y))
-        return tuple(positions)
-
-    def _get_max_reward_simultaneous_arrival(self):
-        # there might be an analytical formula for this,
-        # but I don't feel like solving the problem manually to get it
-        # max_{t_i} \sum_{(i, j) \in E (pairs of agents)} |t_i - t_j|
-        # s.t. 0 \leq t_i < T_{max}
-        # this should have a binary solution where floor(n_agents / 2) agents reach at t=0 and the rest reach at T_max, but there might be edge cases where that isn't the case
-        agents = np.arange(0, self.num_agents)
-        agent_combos = list(combinations(agents, r=2))
-
-        # init the model
-        env = gp.Env()
-        env.setParam("OutputFlag", 0)
-        model = gp.Model(env=env)
-
-        # build decision vars
-        hit_times = defaultdict(int)
-
-        # absolute value is non-linear, so need to linearize with aux variables
-        # for gurobi to work
-        expr_vars = defaultdict(int)
-        # aux variable for the absolute value itself
-        abs_vars = defaultdict(int)
-
-        for i in range(self.num_agents):
-            hit_times[i] = model.addVar(
-                vtype=GRB.INTEGER,
-                lb=0,
-                ub=self._episode_limit - 1,
-                name=f"hit_time_{i}",
-            )
-
-        for i, combo in enumerate(agent_combos):
-            expr_vars[combo] = model.addVar(lb=-GRB.INFINITY, name=f"expr_var_{i}")
-            abs_vars[i] = model.addVar(name=f"abs_var_{i}")
-        model.update()
-
-        # build constraints
-        for i, combo in enumerate(agent_combos):
-            model.addConstr(
-                expr_vars[combo] == (hit_times[combo[0]] - hit_times[combo[1]])
-            )
-            model.addConstr(abs_vars[i] == gp.abs_(expr_vars[combo]))
-        model.update()
-
-        # build objective
-        obj = 0
-        for i, combo in enumerate(agent_combos):
-            obj += abs_vars[i]
-            # print(combo[0], combo[1])
-        model.setObjective(obj, GRB.MAXIMIZE)
-        model.update()
-
-        # solve
-        model.optimize()
-
-        # print("optimal objective value")
-        # print(model.ObjVal)
-        # print("largest-spread hit times")
-        # for i, time in hit_times.items():
-        #     print(i, time.X)
-
-        return model.ObjVal
 
     # grid generation
     def _load_field_map(self, map_name: str) -> pd.DataFrame:
@@ -688,20 +584,6 @@ class TeamNavigationEnv(MultiGridEnv):
 
             self.detector_groups[group_idx] = DetectorGroup(detectors)
 
-    @property
-    def _detected_agents(self):
-        """Return True if any configured detector probabilistically detects an agent."""
-        detected_agents = []
-
-        for _, group in self.detector_groups.items():
-            detected_agents += group.detect_agents(
-                agents=self.agents,
-                comms_val=1.0,
-                random_generator=self.np_random,
-            )
-
-        return detected_agents
-
     def _apply_start_task_adjustments(self, start_task: int) -> None:
         """Apply adjustments to the grid and agents so the environment appears
         as if earlier rooms were already completed.
@@ -879,9 +761,6 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # check if actions are valid, replace with STAY if not valid
         for agent, action in zip(self.agents, actions):
-            if self._delayed_agents[agent.index]:
-                action = self.actions.STAY
-
             # get stochastic action
             action = self.transition_prob.get_stochastic_action(
                 action,
@@ -1226,23 +1105,6 @@ class TeamNavigationEnv(MultiGridEnv):
         obs[:, 4] = self._delayed_agents
         return obs
 
-    def _get_navigation_features(self, agent_idx: int) -> NDArray[np.float32]:
-        features = np.empty(5, dtype=np.float32)
-        agent_x, agent_y = self.agents[agent_idx].pos
-        features[0] = agent_x / self._coordinate_scale[0]
-        features[1] = agent_y / self._coordinate_scale[1]
-
-        goal_positions = self.agents[agent_idx].task_goals.get(self.current_task)
-        if goal_positions is None or len(goal_positions) == 0:
-            features[2:4] = 0.0
-        else:
-            goal_x, goal_y = goal_positions[0]
-            features[2] = goal_x / self._coordinate_scale[0]
-            features[3] = goal_y / self._coordinate_scale[1]
-
-        features[4] = self._delayed_agents[agent_idx]
-        return features
-
     def _sample_agent_delays(self) -> None:
         self._delayed_agents.fill(False)
         if self.num_agents > 1:
@@ -1258,23 +1120,6 @@ class TeamNavigationEnv(MultiGridEnv):
             dtype=np.float32,
         )
 
-        """
-        hit_time = self.agents[agent_idx].t_first_hit_goal
-        # binary representation of whether the agent has hit a goal state yet or not
-        has_hit = float(hit_time >= 0)
-        if hit_time >= 0:
-            normalized_hit_time = np.clip(hit_time / self._time_scale, 0.0, 1.0)
-        else:
-            normalized_hit_time = 0.0
-
-        return np.concatenate(
-            (
-                agent_position,
-                np.array([has_hit, normalized_hit_time], dtype=np.float32),
-            )
-        ).astype(np.float32)
-        """
-
     def _get_navigation_goal_positions(self, agent_idx: int) -> NDArray[np.float32]:
         goal_positions = self.agents[agent_idx].task_goals.get(self.current_task)
         if goal_positions is None or len(goal_positions) == 0:
@@ -1287,15 +1132,6 @@ class TeamNavigationEnv(MultiGridEnv):
             ],
             dtype=np.float32,
         )
-
-    def _get_elapsed_time_obs(self) -> NDArray[np.float32]:
-        return np.array(
-            [np.clip(self._t / self._time_scale, 0.0, 1.0)], dtype=np.float32
-        )
-
-    def _get_navigation_coordinate_scale(self) -> NDArray[np.float32]:
-        """Scale coordinates against the walkable inner grid dimensions."""
-        return self._coordinate_scale
 
     def _get_obs_size(self) -> int:
         """standard function to interface with EPyMARL training loop, returns the flattened size of a single agent's observation."""
@@ -1331,17 +1167,6 @@ class TeamNavigationEnv(MultiGridEnv):
 
             _avail_actions_team.append(list(avail_actions_dict.values()))
         return _avail_actions_team
-
-    def _get_valid_actions(self, agent: LBFAgent) -> list[int]:
-        # handle actions that cause the agent to collide w/ a non-overlappable objects
-        valid = []
-        for action in self.actions:
-            if action == self.actions.STAY or self._check_valid_pos(
-                self._get_next_pos(agent, action.value)
-            ):
-                valid.append(action.value)
-
-        return valid
 
     def _set_action_space(self) -> tuple[spaces.Space, int]:
         env_agent_action_space = spaces.Discrete(len(self.actions))
