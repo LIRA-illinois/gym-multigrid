@@ -18,42 +18,40 @@ tasks:
   - id: 0_to_1
     from_state: 0
     to_state: 1
-    goal_positions: [[1, 6], [7, 6], [4, 5]]
+    goal_positions: [[7, 1], [7, 5], [1, 3]]
     init_state_dist:
-      states: [[[2, 2], [3, 2], [4, 2]]]
+      states: [[[1, 1], [1, 5], [7, 3]]]
       probs: [1.0]
 
   - id: 0_to_2
     from_state: 0
     to_state: 2
-    goal_positions: [[5, 1], [6, 3], [2, 5]]
+    goal_positions: [[2, 1], [2, 5], [1, 3]]
     init_state_dist:
-      states: [[[2, 2], [3, 2], [4, 2]]]
+      states: [[[1, 1], [1, 5], [7, 3]]]
       probs: [1.0]
 
   - id: 1_to_3
     from_state: 1
     to_state: 3
-    goal_positions: [[1, 1], [7, 1], [4, 7]]
+    goal_positions: [[1, 1], [1, 5], [7, 3]]
     init_state_dist:
-      states: [[[1, 6], [7, 6], [4, 5]]]
+      states: [[[7, 1], [7, 5], [1, 3]]]
       probs: [1.0]
 
   - id: 2_to_3
     from_state: 2
     to_state: 3
-    goal_positions: [[1, 1], [7, 1], [4, 7]]
+    goal_positions: [[1, 1], [1, 5], [7, 3]]
     init_state_dist:
-      states: [[[5, 1], [6, 3], [2, 5]]]
+      states: [[[2, 1], [2, 5], [1, 3]]]
       probs: [1.0]
 
   - id: 3_to_4
     from_state: 3
     to_state: 4
-    # The init_state_dist for 3->4 must match the predecessors' goal_positions
-    # (continuity invariant). Those are [[1,1],[7,1],[4,7]] from the tasks
-    # that lead into state 3.
-    goal_positions: [[1, 2], [7, 2], [4, 6]]
+    # The init_state_dist for 3->4 matches the predecessors' goal_positions.
+    goal_positions: [[2, 2], [7, 4], [2, 4]]
     init_state_dist:
-      states: [[[1, 1], [7, 1], [4, 7]]]
+      states: [[[1, 1], [1, 5], [7, 3]]]
       probs: [1.0]
