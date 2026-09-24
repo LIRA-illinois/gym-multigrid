@@ -335,7 +335,7 @@ class MazeEnv(MultiGridEnv[NDArray[np.int64]]):
             self.put_obj(
                 Obstacle(
                     self.world,
-                    penalty=self.reward.wall_penalty_ratio * self.reward.flag_reward,
+                    reward=-self.reward.wall_penalty_ratio * self.reward.flag_reward,
                 ),
                 i,
                 j,

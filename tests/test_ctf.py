@@ -18,9 +18,12 @@ def test_ctf_pos_map() -> None:
     obs, _ = env.reset()
     frames = [env.render()]
 
-    action = env.action_space.sample()
-    obs, reward, terminated, truncated, info = env.step(action)
-    frames.append(env.render())
+    for _ in range(5):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        frames.append(env.render())
+        if terminated or truncated:
+            break
 
     os.makedirs("tests/out/animations", exist_ok=True)
     imageio.mimsave("tests/out/animations/ctf_pos_map.gif", frames, duration=0.5)

@@ -230,7 +230,7 @@ class WildfireEnv(MultiGridEnv):
                 f"{a.index}": Box(
                     low=low,
                     high=high,
-                    dtype=np.float32,
+                    dtype=np.float64,
                 )
                 for a in self.agents
             }
@@ -403,7 +403,7 @@ class WildfireEnv(MultiGridEnv):
                     self.grid_size_without_walls + 1,
                     self.grid_size_without_walls + 1,
                 ),
-                dtype=np.float32,
+                dtype=np.float64,
             )
             for _ in range(self.num_agents)
         ]
@@ -454,7 +454,7 @@ class WildfireEnv(MultiGridEnv):
         for a in self.agents:
             agent_obs[a.index] = np.append(
                 agent_obs[a.index].flatten(),
-                np.array(self.step_count / self.max_steps, dtype=np.float32),
+                np.array(self.step_count / self.max_steps, dtype=np.float64),
             )
         return agent_obs
 
@@ -473,7 +473,7 @@ class WildfireEnv(MultiGridEnv):
                 self.grid_size,
                 self.grid_size,
             ),
-            dtype=np.float32,
+            dtype=np.float64,
         )
 
         # update tree states and walls in state representation
@@ -495,7 +495,7 @@ class WildfireEnv(MultiGridEnv):
         # flatten, and append normalized time step at the end of, state representation
         s = np.append(
             s.flatten(),
-            np.array(self.step_count / self.max_steps, dtype=np.float32),
+            np.array(self.step_count / self.max_steps, dtype=np.float64),
         )
         return s
 
@@ -574,7 +574,7 @@ class WildfireEnv(MultiGridEnv):
                 self.grid_size,
                 self.grid_size,
             ),
-            dtype=np.float32,
+            dtype=np.float64,
         )
         # update tree states and walls in state representation. There are no burnt trees in the state
         state[0, :, :] = 1
@@ -603,7 +603,7 @@ class WildfireEnv(MultiGridEnv):
         # flatten, and append normalized time step at the end of, state representation
         state = np.append(
             state.flatten(),
-            np.array(time_step / self.max_steps, dtype=np.float32),
+            np.array(time_step / self.max_steps, dtype=np.float64),
         )
         return state
 

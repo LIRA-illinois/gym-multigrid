@@ -232,7 +232,7 @@ class LabyrinthEnv(MultiGridEnv):
             observation_space = spaces.Box(
                 low=np.zeros(obs_shape),
                 high=max_val * np.ones(obs_shape),
-                dtype=np.float32,
+                dtype=np.float64,
             )
 
         return observation_space
@@ -342,14 +342,14 @@ class LabyrinthEnv(MultiGridEnv):
             obs: dict[str, Any] = {}
 
         elif self.obs_type in ["array", "array_scaled"]:
-            obs: NDArray[np.int_] = np.zeros((self.num_agents, 4), dtype=np.float32)
+            obs: NDArray[np.int_] = np.zeros((self.num_agents, 4), dtype=np.float64)
 
         else:
             obs = None
 
         for agent in self.agents:
             # agent_obs: [agent_x, agent_y, assigned_goal_x, assigned_goal_y]
-            agent_obs = np.array(agent.pos, dtype=np.float32)
+            agent_obs = np.array(agent.pos, dtype=np.float64)
 
             # agent obs needs to be an np array here b/c final state is already an array
 
@@ -369,7 +369,7 @@ class LabyrinthEnv(MultiGridEnv):
             # subtract 2 b/c we assume an outer wall around the env
             max_x: int = self.width - 2
             max_y: int = self.height - 2
-            obs_scaled = obs / np.array([max_x, max_y, max_x, max_y], dtype=np.float32)
+            obs_scaled = obs / np.array([max_x, max_y, max_x, max_y], dtype=np.float64)
             return obs_scaled
 
         return obs

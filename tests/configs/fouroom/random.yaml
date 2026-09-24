@@ -1,0 +1,51 @@
+layout_config:
+  field_map:
+    [
+      "#############",
+      "#     #     #",
+      "#     #     #",
+      "#           #",
+      "#     #     #",
+      "#     #     #",
+      "## ####     #",
+      "#     ### ###",
+      "#     #     #",
+      "#     #     #",
+      "#           #",
+      "#     #     #",
+      "#############",
+    ]
+  spawn_configs:
+    - agent: [[1, 7], [5, 5]]
+      goal: { "pos": [[7, 1], [5, 6]], "reward": 1.0, "absorbing": true }
+      lavas:
+        - { "pos": [[1, 7], [5, 5]], "reward": -1, "absorbing": true }
+        - { "pos": [[1, 7], [5, 5]], "reward": -1, "absorbing": true }
+        - { "pos": [[1, 7], [5, 5]], "reward": -1, "absorbing": true }
+        - { "pos": [[1, 1], [5, 5]], "reward": 0, "absorbing": false }
+        - { "pos": [[1, 1], [5, 5]], "reward": 0, "absorbing": false }
+        - { "pos": [[1, 1], [5, 5]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 1], [5, 6]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 1], [5, 6]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 1], [5, 6]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 8], [5, 4]], "reward": -1, "absorbing": true }
+        - { "pos": [[7, 8], [5, 4]], "reward": -1, "absorbing": true }
+        - { "pos": [[7, 8], [5, 4]], "reward": -1, "absorbing": true }
+      holes:
+        - { "pos": [[1, 7], [5, 5]], "reward": 0, "absorbing": false }
+        - { "pos": [[1, 7], [5, 5]], "reward": 0, "absorbing": false }
+        - { "pos": [[1, 7], [5, 5]], "reward": 0, "absorbing": false }
+        - { "pos": [[1, 1], [5, 5]], "reward": -1, "absorbing": true }
+        - { "pos": [[1, 1], [5, 5]], "reward": -1, "absorbing": true }
+        - { "pos": [[1, 1], [5, 5]], "reward": -1, "absorbing": true }
+        - { "pos": [[7, 1], [5, 6]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 1], [5, 6]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 1], [5, 6]], "reward": 0, "absorbing": false }
+        - { "pos": [[7, 8], [5, 4]], "reward": -1, "absorbing": true }
+        - { "pos": [[7, 8], [5, 4]], "reward": -1, "absorbing": true }
+        - { "pos": [[7, 8], [5, 4]], "reward": -1, "absorbing": true }
+      cleared_doorways:
+        - [2, 6]
+        - [6, 3]
+        - [9, 7]
+        - [6, 10]

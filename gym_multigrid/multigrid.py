@@ -9,14 +9,13 @@ from typing import (
     Literal,
     SupportsFloat,
     Type,
-    TypedDict,
     TypeVar,
 )
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from gymnasium.core import ActType, ObsType
+from gymnasium.core import ObsType
 from gymnasium.spaces.space import Space
 from numpy.typing import NDArray
 from pydantic import BaseModel, Field
@@ -26,7 +25,7 @@ from gym_multigrid.core.constants import OBJECT_TO_STR, TILE_PIXELS
 from gym_multigrid.core.grid import Grid
 from gym_multigrid.core.object import Door, WorldObj
 from gym_multigrid.core.world import DefaultWorld, World
-from gym_multigrid.typing import Position
+from gym_multigrid.typing import Position, Size
 from gym_multigrid.utils.window import Window
 
 EnvType = TypeVar("EnvType", bound="MultiGridEnv")
@@ -446,16 +445,33 @@ class MultiGridEnv(gym.Env[ObsType, np.int64 | NDArray[np.int64]]):
         self,
         obj: WorldObj,
         top: Position | None = None,
-        size: tuple[int, int] | None = None,
+        size: Size | None = None,
         reject_fn: Callable[["MultiGridEnv", Position], bool] | None = None,
         max_tries: float = math.inf,
     ):
         """
         Place an object at an empty position in the grid
 
-        :param top: top-left position of the rectangle where to place
-        :param size: size of the rectangle where to place
-        :param reject_fn: function to filter out potential positions
+        Parameters
+        ----------
+        obj : WorldObj
+            The object to place in the grid
+        top : Position | None = None
+            The top-left position of the rectangle where to place the object.
+            If None, the whole grid will be used.
+        size : Size | None = None
+            The size of the rectangle where to place the object (width, height).
+            If None, the whole grid will be used.
+        reject_fn : Callable[["MultiGridEnv", Position], bool] | None = None
+            A function that takes the environment and a position as input and returns True if the position should
+            be rejected for placing the object. If None, no filtering is applied.
+        max_tries : float = math.inf
+            Maximum number of tries to place the object at a random position.
+
+        Returns
+        -------
+        pos : Position
+            The position where the object was placed in the grid.
         """
 
         if top is None:
@@ -477,19 +493,18 @@ class MultiGridEnv(gym.Env[ObsType, np.int64 | NDArray[np.int64]]):
             num_tries += 1
 
             pos: Position = (
-                self._rand_int(top[0], min(top[0] + size[0], self.grid.width - 1)),
-                self._rand_int(top[1], min(top[1] + size[1], self.grid.height - 1)),
+                self._rand_int(top[0], min(top[0] + size[0] - 1, self.grid.width - 1)),
+                self._rand_int(top[1], min(top[1] + size[1] - 1, self.grid.height - 1)),
             )
 
             # Don't place the object on top of another object
-            if self.grid.get(*pos) != None:
+            if self.grid.get(*pos):
                 continue
-
             # Check if there is a filtering criterion
-            if reject_fn and reject_fn(self, pos):
+            elif reject_fn and reject_fn(self, pos):
                 continue
-
-            break
+            else:
+                break
 
         self.grid.set(*pos, obj)
 
@@ -513,13 +528,34 @@ class MultiGridEnv(gym.Env[ObsType, np.int64 | NDArray[np.int64]]):
         agent: Agent,
         pos: Position | None = None,
         top: Position | None = None,
-        size: tuple[int, int] | None = None,
+        size: Size | None = None,
         rand_dir: bool = False,
         max_tries: float = math.inf,
         reset_agent_status: bool = False,
     ) -> Position:
         """
         Set the agent's starting point at an empty position in the grid and reset the agent's state
+
+        Parameters
+        ----------
+        agent : Agent
+            The agent to place in the grid
+        pos : Position | None = None
+            The position to place the agent at. If None, a random position will be chosen.
+        top : Position | None = None
+            The top-left position of the rectangle where to place the agent.
+            If None, the whole grid will be used.
+        size : Size | None = None
+            The size of the rectangle where to place the agent.
+            If None, the whole grid will be used.
+        rand_dir : bool = False
+            Whether to randomly set the agent's direction.
+            If False, the agent will face to direction 3.
+        max_tries : float = math.inf
+            Maximum number of tries to place the agent at a random position.
+        reset_agent_status : bool = False
+            Whether to reset the agent's status (e.g., position, direction).
+            If False, the agent's position and direction will not be reset.
         """
         if reset_agent_status:
             agent.reset()
@@ -541,6 +577,54 @@ class MultiGridEnv(gym.Env[ObsType, np.int64 | NDArray[np.int64]]):
             agent.dir = 3
 
         agent.init_dir = agent.dir
+
+        return pos
+
+    def place_object(
+        self,
+        obj: WorldObj,
+        pos: Position | None = None,
+        top: Position | None = None,
+        size: Size | None = None,
+        reject_fn: Callable[["MultiGridEnv", Position], bool] | None = None,
+        max_tries: float = math.inf,
+        reset_obj_status: bool = False,
+    ) -> Position:
+        """
+        Place an object at an empty position in the grid.
+
+        Parameters
+        ----------
+        obj : WorldObj
+            The object to place in the grid.
+        pos : Position | None = None
+            The position to place the object at. If None, a random position will be chosen.
+        top : Position | None = None
+            The top-left position of the rectangle where to place the object.
+            If None, the whole grid will be used.
+        size : Size | None = None
+            The size of the rectangle where to place the object.
+            If None, the whole grid will be used.
+        reject_fn : Callable[["MultiGridEnv", Position], bool] | None = None
+            A function that takes the environment and a position as input and returns True if the position should
+            be rejected for placing the object. If None, no filtering is applied.
+        max_tries : float = math.inf
+            Maximum number of tries to place the object at a random position.
+        reset_obj_status : bool = False
+            Whether to reset the object's status (e.g., position).
+        """
+        if reset_obj_status:
+            obj.reset()
+        else:
+            pass
+
+        if pos is not None and pos != (-1, -1):
+            obj.pos = pos
+            self.put_obj(obj, i=pos[0], j=pos[1])
+        else:
+            pos = self.place_obj(obj, top, size, reject_fn, max_tries=max_tries)
+            obj.pos = pos
+            obj.init_pos = pos
 
         return pos
 

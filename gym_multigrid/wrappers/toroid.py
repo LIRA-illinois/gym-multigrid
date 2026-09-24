@@ -1,5 +1,5 @@
-import numpy as np
 import gymnasium as gym
+import numpy as np
 from gymnasium import ObservationWrapper, spaces
 
 
@@ -43,7 +43,7 @@ class ToroidObservation(ObservationWrapper):
         toroids = []
         for a in self.env.agents:
             pos = a.pos
-            tor = np.zeros(self.observation_space.shape, dtype="float32")
+            tor = np.zeros(self.observation_space.shape, dtype="float64")
             for i in range(self.env.width):
                 for j in range(self.env.height):
                     new_coords = [i - pos[0], j - pos[1]]

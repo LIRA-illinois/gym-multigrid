@@ -272,17 +272,19 @@ class Goal(WorldObj):
     def __init__(
         self,
         world: World,
-        index: int,
+        index: int | None = None,
         reward: float = 1,
-        color=None,
+        color: str | None = None,
         absorbing: bool = False,
     ):
-        if color is None:
+        if color is None and index is not None:
             super().__init__(
                 world, "goal", world.IDX_TO_COLOR[index], absorbing=absorbing
             )
-        else:
+        elif color is not None:
             super().__init__(world, "goal", color=color, absorbing=absorbing)
+        else:
+            super().__init__(world, "goal", "green", absorbing=absorbing)
         self.index = index
         self.reward = reward
 

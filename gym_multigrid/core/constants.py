@@ -34,6 +34,7 @@ ACCESSIBLE_COLORS: dict[str, NDArray[np.uint8]] = {
     "black": np.array([0, 0, 0]),
     "grey": np.array([127, 127, 127]),
     "light_grey": np.array([199, 199, 199]),
+    "dark_grey": np.array([77, 77, 77]),
 }
 
 CTF_COLORS: dict[str, NDArray[np.uint8]] = {

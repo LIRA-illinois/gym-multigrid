@@ -507,6 +507,81 @@ class PreyPredEnv(MultiGridEnv[NDArray[np.int_]]):
     - Easy preys require 1 predator to capture and 0 predator to fix (immediately captured).
     - Hard preys require 2 predators to capture and 1 predator to fix.
 
+    Predators
+    ---------
+    - Predators can capture preys by moving to their position.
+    - Predators can fix preys by moving to their position when the prey is captured.
+    - Predators can be of two types: ego and teammate.
+    - Ego predators are controlled by the user and can capture any prey.
+    - Teammate predators are controlled by the environment and can only capture preys designated to them.
+
+    Rewards
+    -------
+    - Predators receive a reward for capturing preys.
+    - The reward is equal to the `capture_reward` of the prey type.
+
+    Termination
+    -----------
+    - The episode ends when all preys are captured.
+
+    Example
+    -------
+    ```python
+    import gymnasium as gym
+    import gym_multigrid
+
+    env = gym.make(
+        "multigrid-prey-pred-v0",
+        max_episode_steps=100,
+        observation_config={
+            "encode_prey_areas": True,
+        },
+        pred_configs=[
+            {
+                "init_pos": (6, 6),
+                "policy_type": "ego",
+                "color": "red",
+                "target_preys": [],
+            },
+            {
+                "init_pos": (6, 7),
+                "policy_type": "teammate",
+                "color": "blue",
+                "target_preys": [],
+            },
+        ],
+        prey_configs=[
+            {
+                "type": "easy_prey",
+                "territory_dims": (4, 4),
+                "territory_left_top_corner": (2, 2),
+                "color": "yellow",
+            },
+            {
+                "type": "hard_prey",
+                "territory_dims": (4, 4),
+                "territory_left_top_corner": (9, 9),
+                "color": "red",
+            },
+        ],
+        prey_types=[
+            {
+                "name": "easy_prey",
+                "policy": "random",
+                "capture_reward": 1.0,
+                "num_required_preds_capture": 1,
+                "num_required_preds_fix": 1,
+            },
+            {
+                "name": "hard_prey",
+                "policy": "random",
+                "capture_reward": 1.0,
+                "num_required_preds_capture": 2,
+                "num_required_preds_fix": 1,
+            },
+        ],
+    )
+    ```
     """
 
     agents: list[Prey | Predator]  # List of agents in the environment

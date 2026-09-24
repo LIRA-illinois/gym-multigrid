@@ -524,7 +524,7 @@ class CtfMvNEnv(MultiGridEnv):
             )
 
         for i, j in self.obstacle:
-            self.put_obj(Obstacle(self.world, penalty=self.obstacle_penalty), i, j)
+            self.put_obj(Obstacle(self.world, reward=-self.obstacle_penalty), i, j)
 
         self.put_obj(
             Flag(
@@ -545,6 +545,7 @@ class CtfMvNEnv(MultiGridEnv):
 
         self.init_grid: Grid = self.grid.copy()
 
+    def _reset_agents(self) -> None:
         # Choose non-overlapping indices for the blue agents and place them in the blue territory.
         blue_indices: list[int] = self.np_random.choice(
             len(self.blue_territory), self.num_blue_agents, replace=False

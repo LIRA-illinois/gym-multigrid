@@ -4,9 +4,11 @@ import gymnasium as gym
 import imageio
 import numpy as np
 import pytest
+import yaml
+from numpy.typing import NDArray
 
 import gym_multigrid
-from gym_multigrid.core.agent import GridActions
+from gym_multigrid.core.agent import NavigationActions
 
 
 @pytest.fixture
@@ -35,14 +37,36 @@ def test_rooms_render(rooms_env: gym.Env) -> None:
 
 def test_rooms_render_lava():
     """Test RoomsEnv render with lava"""
-    env = gym.make("multigrid-rooms-v0", spawn_type=3)
+    env = gym.make("multigrid-rooms-v0", spawn_type=3, state_representation="tensor")
     image_path = "tests/out/plots/test_rooms_render_lava.png"
-    env.reset()
-    img = env.render()
+    target_obs: NDArray[np.int64] = np.array(
+        [
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 4, 1],
+            [1, 0, 0, 4, 0, 0, 1, 0, 0, 4, 0, 0, 1],
+            [1, 0, 5, 0, 0, 4, 0, 5, 0, 0, 0, 0, 1],
+            [1, 0, 0, 0, 5, 0, 1, 0, 4, 3, 0, 0, 1],
+            [1, 0, 0, 4, 0, 0, 1, 0, 0, 0, 5, 0, 1],
+            [1, 1, 0, 1, 1, 1, 1, 0, 5, 0, 0, 0, 1],
+            [1, 0, 5, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1],
+            [1, 0, 0, 4, 0, 0, 1, 5, 0, 0, 4, 0, 1],
+            [1, 5, 0, 2, 0, 4, 1, 0, 4, 0, 0, 0, 1],
+            [1, 0, 0, 0, 5, 0, 0, 0, 0, 5, 0, 0, 1],
+            [1, 0, 4, 0, 0, 0, 1, 4, 0, 0, 0, 5, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ]
+    )
 
+    obs, _ = env.reset()
+    img = env.render()
     os.makedirs(os.path.dirname(image_path), exist_ok=True)
     imageio.imsave(image_path, img)
     assert os.path.exists(image_path)
+    assert np.array_equal(obs, target_obs)
+
+    new_obs, _, _, _, _ = env.step(np.array(NavigationActions.STAY))
+    assert np.array_equal(new_obs, obs)
+
     env.close()
 
 
@@ -52,7 +76,7 @@ def test_rooms_reset(rooms_env: gym.Env) -> None:
     assert obs is not None
     assert isinstance(info, dict)
     assert info == {
-        "success": False,
+        "is_success": False,
     }
 
 
@@ -65,9 +89,9 @@ def test_rooms_reset(rooms_env: gym.Env) -> None:
                     {"agent": (2, 3), "goal": {"pos": (3, 3), "reward": 1.0}}
                 ]
             },
-            GridActions.RIGHT,
-            1.0,
-            {"success": True},
+            NavigationActions.RIGHT,
+            0.99,
+            {"is_success": True},
         ),
         (
             {
@@ -75,9 +99,9 @@ def test_rooms_reset(rooms_env: gym.Env) -> None:
                     {"agent": (2, 3), "goal": {"pos": (3, 3), "reward": 1.0}}
                 ]
             },
-            GridActions.LEFT,
-            0.0,
-            {"success": False},
+            NavigationActions.LEFT,
+            -0.01,
+            {"is_success": False},
         ),
         (
             {
@@ -85,9 +109,9 @@ def test_rooms_reset(rooms_env: gym.Env) -> None:
                     {"agent": (2, 3), "goal": {"pos": (3, 3), "reward": 1.0}}
                 ]
             },
-            GridActions.UP,
-            0.0,
-            {"success": False},
+            NavigationActions.UP,
+            -0.01,
+            {"is_success": False},
         ),
         (
             {
@@ -95,9 +119,9 @@ def test_rooms_reset(rooms_env: gym.Env) -> None:
                     {"agent": (2, 3), "goal": {"pos": (3, 3), "reward": 1.0}}
                 ]
             },
-            GridActions.DOWN,
-            0.0,
-            {"success": False},
+            NavigationActions.DOWN,
+            -0.01,
+            {"is_success": False},
         ),
     ],
 )
@@ -140,3 +164,25 @@ def test_rooms_episode() -> None:
     os.makedirs(os.path.dirname(animation_path), exist_ok=True)
     imageio.mimsave(animation_path, frames, duration=0.1)
     assert os.path.exists(animation_path)
+
+
+def test_random_spawn() -> None:
+    """Test RoomsEnv with random spawn."""
+    layout_config_path: str = "tests/configs/fouroom/random.yaml"
+    with open(layout_config_path, "r") as f:
+        layout_config = yaml.safe_load(f)["layout_config"]
+    env = gym.make(
+        "multigrid-rooms-v0",
+        layout_config=layout_config,
+        state_representation="positional_dict",
+    )
+    obs, info = env.reset()
+    assert obs is not None
+    assert isinstance(info, dict)
+    assert info == {"is_success": False}
+
+    image = env.render()
+    image_path = "tests/out/plots/test_rooms_random_spawn.png"
+    os.makedirs(os.path.dirname(image_path), exist_ok=True)
+    imageio.imsave(image_path, image)  # type: ignore
+    assert os.path.exists(image_path)
