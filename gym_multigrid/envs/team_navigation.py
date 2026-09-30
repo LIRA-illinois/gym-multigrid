@@ -1185,6 +1185,10 @@ class TeamNavigationEnv(MultiGridEnv):
         return action_space, ac_dim
 
     # rendering
+    def render_grid(self):
+        """Render the base environment grid without diagnostic panels."""
+        return super().render()
+
     def render(self):
         img = super().render()
         env_width = img.shape[1]
