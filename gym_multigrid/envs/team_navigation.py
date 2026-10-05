@@ -26,7 +26,7 @@ from gym_multigrid.typing_utils import Position
 from gym_multigrid.utils.rendering import (
     FontConfig,
 )
-from gym_multigrid.utils.subtasks import NavigationTaskCatalog
+from gym_multigrid.utils.subtasks import NavigationTaskCatalog, PositionDist
 
 RENDER_TEXT_CONFIG = {
     "fontFace": FontConfig.fontFace,
@@ -383,6 +383,7 @@ class TeamNavigationEnv(MultiGridEnv):
         height: int,
         start_task: int = 0,
         navigation_task_transition: tuple[int, int] | None = None,
+        navigation_init_state_dist: PositionDist | None = None,
     ) -> None:
         # Create a blank grid for this episode
         self.grid = Grid(width, height, self.world)
@@ -410,7 +411,9 @@ class TeamNavigationEnv(MultiGridEnv):
         # spawn agents
         if self.navigation_task_catalog:
             transition = navigation_task_transition or (start_task, start_task)
-            self._spawn_navigation_agents(*transition)
+            self._spawn_navigation_agents(
+                *transition, init_state_dist=navigation_init_state_dist
+            )
         else:
             self._spawn_agents()
 
@@ -455,15 +458,26 @@ class TeamNavigationEnv(MultiGridEnv):
             agent.task_goals = {to_state: np.asarray([goal_position], dtype=np.int_)}
             self.room_despawn_objects[to_state].append(goal)
 
-    def _spawn_navigation_agents(self, from_state: int, to_state: int) -> None:
+    def _spawn_navigation_agents(
+        self,
+        from_state: int,
+        to_state: int,
+        init_state_dist: PositionDist | None = None,
+    ) -> None:
         if self.navigation_task_catalog is None:
             raise ValueError("No navigation task catalog is configured.")
         task = self.navigation_task_catalog.task_for(from_state, to_state)
 
-        joint_positions = task.init_state_dist.states[
-            self.np_random.choice(
-                len(task.init_state_dist.states), p=task.init_state_dist.probs
+        # Dependent subtasks override the catalog's fixed spawn distribution with
+        # the predecessor subtask's learned successful final-state distribution.
+        spawn_dist = init_state_dist or task.init_state_dist
+        if spawn_dist is None:
+            raise ValueError(
+                f"Navigation task {from_state}->{to_state} has no initial state "
+                "distribution; train a predecessor task first or configure one."
             )
+        joint_positions = spawn_dist.states[
+            self.np_random.choice(len(spawn_dist.states), p=spawn_dist.probs)
         ]
         if len(joint_positions) != self.num_agents:
             raise ValueError(
@@ -692,9 +706,19 @@ class TeamNavigationEnv(MultiGridEnv):
         self.current_task = 0
         self.active_task_state = 0
         navigation_task_transition = None
+        navigation_init_state_dist = None
         if options is not None and "navigation_task_transition" in options:
             navigation_task_transition = tuple(
                 int(state) for state in options["navigation_task_transition"]
+            )
+        if options is not None and "navigation_init_state_dist" in options:
+            spawn_config = options["navigation_init_state_dist"]
+            navigation_init_state_dist = PositionDist(
+                states=tuple(
+                    tuple(tuple(position) for position in joint_state)
+                    for joint_state in spawn_config["states"]
+                ),
+                probs=tuple(float(prob) for prob in spawn_config["probs"]),
             )
         if options is not None and "navigation_task_state" in options:
             self.current_task = int(options["navigation_task_state"])
@@ -719,6 +743,7 @@ class TeamNavigationEnv(MultiGridEnv):
             self.height,
             start_task=self.current_task,
             navigation_task_transition=navigation_task_transition,
+            navigation_init_state_dist=navigation_init_state_dist,
         )
         self._sample_agent_delays()
 
@@ -1034,6 +1059,7 @@ class TeamNavigationEnv(MultiGridEnv):
         # TODO this doesn't quite work for the multi-task case, need to figure that out
         info["task_completed"] = task_completed
         info["navigation_task_state"] = self.active_task_state
+        info["final_state"] = tuple(tuple(agent.pos) for agent in self.agents)
 
         return info
 

@@ -89,7 +89,7 @@ class NavigationTaskData:
     from_state: int
     to_state: int
     goal_positions: tuple[Position, ...]
-    init_state_dist: PositionDist
+    init_state_dist: PositionDist | None
     task_id: str | None = None
 
     @property
@@ -123,6 +123,8 @@ class NavigationTaskCatalog:
                 if task is not predecessor and task.from_state == predecessor.to_state
             ]
             for successor in successors:
+                if successor.init_state_dist is None:
+                    continue
                 expected_states = (predecessor.goal_positions,)
                 expected_probs = (1.0,)
                 if (
@@ -162,19 +164,23 @@ class NavigationTaskCatalog:
             goal_positions = tuple(
                 tuple(position) for position in config["goal_positions"]
             )
-            spawn_config = config["init_state_dist"]
-            spawn_states = tuple(
-                tuple(tuple(position) for position in joint_state)
-                for joint_state in spawn_config["states"]
-            )
+            spawn_config = config.get("init_state_dist")
+            if spawn_config is None:
+                init_state_dist = None
+            else:
+                spawn_states = tuple(
+                    tuple(tuple(position) for position in joint_state)
+                    for joint_state in spawn_config["states"]
+                )
+                init_state_dist = PositionDist(
+                    states=spawn_states,
+                    probs=tuple(spawn_config["probs"]),
+                )
             task = NavigationTaskData(
                 from_state=from_state,
                 to_state=to_state,
                 goal_positions=goal_positions,
-                init_state_dist=PositionDist(
-                    states=spawn_states,
-                    probs=tuple(spawn_config["probs"]),
-                ),
+                init_state_dist=init_state_dist,
                 task_id=config.get("id"),
             )
             if len(goal_positions) != num_agents:
