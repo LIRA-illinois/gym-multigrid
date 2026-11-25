@@ -319,6 +319,7 @@ class TeamNavigationEnv(MultiGridEnv):
             navigation_task_catalog
             and any(
                 navigation_task_catalog[transition].goal_assignment == "one_to_one"
+                or navigation_task_catalog[transition].has_multiple_goal_options
                 for transition in navigation_task_catalog
             )
         )
@@ -523,19 +524,38 @@ class TeamNavigationEnv(MultiGridEnv):
             for agent in self.agents:
                 agent.task_goals = {to_state: goal_array}
         else:
-            for agent, goal_position in zip(self.agents, task.goal_positions):
-                goal = Goal(
-                    self.world,
-                    color="dark_yellow",
-                    assigned_agent_index=agent.index,
-                )
-                self.place_object(goal, pos=goal_position)
-                if hasattr(self, "init_grid"):
-                    self.init_grid.set(*goal_position, goal)
-                agent.task_goals = {
-                    to_state: np.asarray([goal_position], dtype=np.int_)
-                }
-                self.room_despawn_objects[to_state].append(goal)
+            if task.has_multiple_goal_options:
+                for agent, goal_options in zip(
+                    self.agents,
+                    task.goal_position_options_by_agent,
+                    strict=True,
+                ):
+                    goal_array = np.asarray(goal_options, dtype=np.int_)
+                    agent.task_goals = {to_state: goal_array}
+                    for goal_position in goal_options:
+                        goal = Goal(
+                            self.world,
+                            color="dark_yellow",
+                            assigned_agent_index=agent.index,
+                        )
+                        self.place_object(goal, pos=goal_position)
+                        if hasattr(self, "init_grid"):
+                            self.init_grid.set(*goal_position, goal)
+                        self.room_despawn_objects[to_state].append(goal)
+            else:
+                for agent, goal_position in zip(self.agents, task.goal_positions):
+                    goal = Goal(
+                        self.world,
+                        color="dark_yellow",
+                        assigned_agent_index=agent.index,
+                    )
+                    self.place_object(goal, pos=goal_position)
+                    if hasattr(self, "init_grid"):
+                        self.init_grid.set(*goal_position, goal)
+                    agent.task_goals = {
+                        to_state: np.asarray([goal_position], dtype=np.int_)
+                    }
+                    self.room_despawn_objects[to_state].append(goal)
 
     def _one_to_one_goal_set_is_occupied(self) -> bool:
         return {agent.pos for agent in self.agents} == set(
@@ -782,7 +802,7 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # used to render actions
         self._pre_step_actions: NDArray = np.full(self.num_agents, None)
-        self._t_render = "Start"
+        self._t_render = 0
 
         self._t = 0
 
@@ -1337,32 +1357,16 @@ class TeamNavigationEnv(MultiGridEnv):
         img = super().render()
         env_width = img.shape[1]
 
-        # render actions in a separate image that we then append to base env image
-        # determine info image width and create a blank white image
+        # Render timestep, pre-step actions, and observations in one sidebar table.
         sidebar_width = max(12 * self.tile_size, self.num_agents * 2 * self.tile_size)
-        x_text = 5
-        line_height = int(self.tile_size * 0.5)
 
         # ensure pre_step_actions is a 1D array
         if len(self._pre_step_actions.shape) > 1:
             self._pre_step_actions = self._pre_step_actions.flatten()
 
-        action_panel_height = (len(self._pre_step_actions) + 3) * line_height
-        info_shape = (action_panel_height, sidebar_width, 3)
-        if (
-            not hasattr(self, "_render_info_img")
-            or self._render_info_img.shape != info_shape
-            or self._render_info_img.dtype != img.dtype
-        ):
-            self._render_info_img = np.empty(info_shape, dtype=img.dtype)
-        info_img = self._render_info_img
-        info_img.fill(255)
-
-        # start_y set below header to avoid overlap
-        # place observations directly below the action summary in the sidebar
         observation_img = self._render_agent_observations(sidebar_width)
         sidebar_shape = (
-            info_img.shape[0] + observation_img.shape[0],
+            observation_img.shape[0],
             sidebar_width,
             3,
         )
@@ -1372,8 +1376,7 @@ class TeamNavigationEnv(MultiGridEnv):
         ):
             self._render_sidebar = np.empty(sidebar_shape, dtype=img.dtype)
         sidebar = self._render_sidebar
-        sidebar[: info_img.shape[0]] = info_img
-        sidebar[info_img.shape[0] :] = observation_img
+        sidebar[:] = observation_img
         canvas_height = max(img.shape[0], sidebar.shape[0])
         canvas_width = img.shape[1] + sidebar.shape[1]
         canvas_shape = (canvas_height, canvas_width, img.shape[2])
@@ -1405,15 +1408,9 @@ class TeamNavigationEnv(MultiGridEnv):
 
         # Draw text after upscaling so glyphs are rasterized at the output
         # resolution instead of being enlarged from the 32-pixel base canvas.
-        self._render_sidebar_text(
-            img,
-            origin=(env_width * upscale_mult, 0),
-            scale=upscale_mult,
-            line_height=line_height,
-        )
         self._render_agent_observations_text(
             img,
-            origin=(env_width * upscale_mult, action_panel_height * upscale_mult),
+            origin=(env_width * upscale_mult, 0),
             width=sidebar_width,
             scale=upscale_mult,
         )
@@ -1422,10 +1419,10 @@ class TeamNavigationEnv(MultiGridEnv):
 
     def _render_agent_observations(self, width: int) -> NDArray[np.uint8]:
         """Create the background for the agent observation panel."""
-        component_labels = ["agent_x", "agent_y", "goal_x", "goal_y", "delay"]
         line_height = int(self.tile_size * 0.5)
-        header_height = 2 * self.tile_size
-        panel_height = header_height + (len(component_labels) + 1) * line_height
+        observations = np.asarray(self.obs)
+        n_features = observations.shape[1]
+        panel_height = 2 * self.tile_size + (10 + n_features) * line_height
         panel_shape = (panel_height, width, 3)
         if (
             not hasattr(self, "_render_observation_panel")
@@ -1455,43 +1452,6 @@ class TeamNavigationEnv(MultiGridEnv):
             **config,
         )
 
-    def _render_sidebar_text(
-        self,
-        img: NDArray[np.uint8],
-        origin: tuple[int, int],
-        scale: int,
-        line_height: int,
-    ) -> None:
-        x_text = 5
-        y_text = line_height
-        self._put_scaled_text(
-            img,
-            f"t : {self._t_render}",
-            (origin[0] // scale + x_text, origin[1] // scale + y_text),
-            scale,
-            header=True,
-        )
-
-        y_text += line_height
-        self._put_scaled_text(
-            img,
-            "Agent : Pre-step action",
-            (origin[0] // scale + x_text, origin[1] // scale + y_text),
-            scale,
-            header=True,
-        )
-
-        for i, action in enumerate(self._pre_step_actions):
-            if action is not None:
-                action = self.actions(action).name.title()
-            y_text += line_height
-            self._put_scaled_text(
-                img,
-                f"{i} : {action}",
-                (origin[0] // scale + x_text, origin[1] // scale + y_text),
-                scale,
-            )
-
     def _render_agent_observations_text(
         self,
         img: NDArray[np.uint8],
@@ -1501,49 +1461,131 @@ class TeamNavigationEnv(MultiGridEnv):
     ) -> None:
         """Render observation text directly at the final image resolution."""
         observations = np.asarray(self.obs)
-        component_labels = ["agent_x", "agent_y", "goal_x", "goal_y", "delay"]
         line_height = int(self.tile_size * 0.5)
-        header_height = 2 * self.tile_size
         origin_x = origin[0] // scale
         origin_y = origin[1] // scale
+        feature_labels = self._observation_feature_labels(observations.shape[1])
+        source_indices = self._observation_feature_source_indices(observations.shape[1])
 
         self._put_scaled_text(
             img,
-            "Agent observations (feature vectors)",
-            (origin_x + 5, origin_y + self.tile_size),
+            f"t : {self._t_render}",
+            (origin_x + 5, origin_y + line_height),
             scale,
             header=True,
         )
 
-        card_width = width // self.num_agents
-        for index, observation in enumerate(observations):
-            x_offset = index * card_width + 5
-            y_text = header_height
+        y_text = 3 * line_height
+        feature_col_width = max(5 * self.tile_size, width // 4)
+        agent_col_width = (width - feature_col_width) // self.num_agents
+        self._put_scaled_text(
+            img,
+            "",
+            (origin_x + 5, origin_y + y_text),
+            scale,
+            header=True,
+        )
+        for agent_index in range(self.num_agents):
+            x_offset = feature_col_width + agent_index * agent_col_width
             self._put_scaled_text(
                 img,
-                f"Agent {index}",
-                (origin_x + x_offset, origin_y + y_text),
+                f"Agent {agent_index}",
+                (origin_x + x_offset + 5, origin_y + y_text),
+                scale,
+                header=True,
+            )
+        y_text += line_height
+
+        self._put_scaled_text(
+            img,
+            "pre_step_action",
+            (origin_x + 5, origin_y + y_text),
+            scale,
+            header=True,
+        )
+        for agent_index, action in enumerate(self._pre_step_actions):
+            x_offset = feature_col_width + agent_index * agent_col_width
+            rendered_action = (
+                "None" if action is None else self.actions(action).name.title()
+            )
+            self._put_scaled_text(
+                img,
+                rendered_action,
+                (origin_x + x_offset + 5, origin_y + y_text),
                 scale,
             )
-            for feature_index, (label, value) in enumerate(
-                zip(component_labels, observation)
-            ):
-                if feature_index < 4:
-                    value *= self._coordinate_scale[feature_index % 2]
-                y_text += line_height
-                rendered_value = (
-                    "ON"
-                    if label == "delay" and value > 0.5
-                    else "OFF"
-                    if label == "delay"
-                    else f"{value:.0f}"
+        y_text += line_height
+
+        self._put_scaled_text(
+            img,
+            "----------------",
+            (origin_x + 5, origin_y + y_text),
+            scale,
+            header=True,
+        )
+        y_text += line_height
+        self._put_scaled_text(
+            img,
+            "Obs. Feature",
+            (origin_x + 5, origin_y + y_text),
+            scale,
+            header=True,
+        )
+        y_text += line_height
+
+        for feature_index, (feature_label, source_index) in enumerate(
+            zip(feature_labels, source_indices)
+        ):
+            self._put_scaled_text(
+                img,
+                feature_label,
+                (origin_x + 5, origin_y + y_text),
+                scale,
+            )
+            for agent_index, observation in enumerate(observations):
+                x_offset = feature_col_width + agent_index * agent_col_width
+                rendered_value = self._format_observation_feature_value(
+                    source_index,
+                    float(observation[source_index]),
+                    len(feature_labels),
+                    feature_label,
                 )
                 self._put_scaled_text(
                     img,
-                    f"{label}: {rendered_value}",
-                    (origin_x + x_offset, origin_y + y_text),
+                    rendered_value,
+                    (origin_x + x_offset + 5, origin_y + y_text),
                     scale,
                 )
+            y_text += line_height
+
+    def _observation_feature_labels(self, n_features: int) -> list[str]:
+        labels = ["agent_x", "agent_y", "delay"]
+        for goal_feature_index in range(n_features - 3):
+            goal_index = goal_feature_index // 2
+            coordinate = "x" if goal_feature_index % 2 == 0 else "y"
+            labels.append(f"g{goal_index}_{coordinate}")
+        return labels
+
+    def _observation_feature_source_indices(self, n_features: int) -> list[int]:
+        return [0, 1, n_features - 1, *range(2, n_features - 1)]
+
+    def _format_observation_feature_value(
+        self,
+        feature_index: int,
+        value: float,
+        n_features: int,
+        feature_label: str,
+    ) -> str:
+        if feature_label == "delay":
+            return "ON" if value > 0.5 else "OFF"
+        if feature_label in ("agent_x", "agent_y"):
+            axis = 0 if feature_label == "agent_x" else 1
+            return str(int(round(value * self._coordinate_scale[axis])))
+        if feature_label.startswith("g") and feature_label.endswith("_x"):
+            return str(int(round(value * self._coordinate_scale[0])))
+        if feature_label.startswith("g") and feature_label.endswith("_y"):
+            return str(int(round(value * self._coordinate_scale[1])))
+        return f"{value:.2f}"
 
     @property
     def t_render(self) -> str:

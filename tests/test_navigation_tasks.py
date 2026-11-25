@@ -96,6 +96,33 @@ def test_team_delay_probability_targets_any_candidate_delay():
         env.close()
 
 
+def test_delay_status_changes_during_episode_and_is_subset_of_team():
+    env = TeamNavigationEnv(
+        width=8,
+        height=8,
+        n_agents=3,
+        n_agents_delay=1,
+        team_delay_prob=0.5,
+    )
+
+    try:
+        env.reset(seed=101)
+        candidate = tuple(np.flatnonzero(env._delay_candidate_agents))
+        assert len(candidate) == 1
+
+        observed_states = set()
+        for step_index in range(200):
+            state = tuple(np.flatnonzero(env._delayed_agents))
+            observed_states.add(state)
+            assert len(state) <= 1
+            assert set(state).issubset(candidate)
+            env._sample_agent_delays()
+
+        assert len(observed_states) >= 2
+    finally:
+        env.close()
+
+
 def test_nonzero_team_delay_probability_requires_candidates():
     with pytest.raises(ValueError, match="team_delay_prob must be 0"):
         TeamNavigationEnv(
@@ -187,6 +214,115 @@ def test_learned_hallway_catalog_only_configures_root_spawn():
         catalog.task_for(from_state, to_state).init_state_dist is None
         for from_state, to_state in [(1, 2), (2, 3), (3, 4)]
     )
+
+
+def test_two_goal_per_agent_branching_config_samples_initial_states_uniformly():
+    submodule_root = Path(__file__).resolve().parents[1]
+    config_path = (
+        submodule_root
+        / "gym_multigrid"
+        / "envs"
+        / "maps"
+        / "team_navigation"
+        / "navigation_branching_two_goals_small_hall.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text())
+    task_0_to_1 = config["tasks"][0]
+
+    catalog = NavigationTaskCatalog.from_configs(
+        config["tasks"],
+        num_agents=3,
+        width=8,
+        height=10,
+    )
+    task = catalog.task_for(0, 1)
+    assert len(task.goal_position_options_by_agent) == 3
+    assert all(
+        len(options) == 2
+        for options in task.goal_position_options_by_agent
+    )
+    assert task.has_multiple_goal_options
+    assert {
+        (task_edge["from_state"], task_edge["to_state"]):
+        task_edge["goal_positions"]
+        for task_edge in config["tasks"]
+    } == {
+        (0, 1): [[[4, 1], [4, 2]], [[4, 4], [4, 5]], [[4, 7], [4, 8]]],
+        (0, 2): [[[5, 1], [5, 2]], [[5, 4], [5, 5]], [[5, 7], [5, 8]]],
+        (1, 3): [[[1, 1], [1, 2]], [[1, 4], [1, 5]], [[1, 7], [1, 8]]],
+        (2, 3): [[[1, 1], [1, 2]], [[1, 4], [1, 5]], [[1, 7], [1, 8]]],
+        (3, 4): [[[6, 1], [6, 2]], [[6, 4], [6, 5]], [[6, 7], [6, 8]]],
+    }
+
+    env = TeamNavigationEnv(
+        map_name="3ga_1r_two_level_small_hall",
+        n_agents=3,
+        navigation_tasks=config["tasks"],
+    )
+    support_counts = {}
+    try:
+        _, _ = env.reset(
+            seed=2026,
+            options={
+                "navigation_task_transition": [0, 1],
+                "navigation_init_state_dist": task_0_to_1["init_state_dist"],
+            },
+        )
+        for _ in range(4000):
+            _, _ = env.reset(
+                options={
+                    "navigation_task_transition": [0, 1],
+                    "navigation_init_state_dist": task_0_to_1["init_state_dist"],
+                },
+            )
+            support = tuple(tuple(agent.pos) for agent in env.agents)
+            support_counts[support] = support_counts.get(support, 0) + 1
+    finally:
+        env.close()
+
+    assert len(support_counts) == 8
+    proportions = [count / 4000 for count in support_counts.values()]
+    assert all(0.105 <= proportion <= 0.145 for proportion in proportions)
+
+
+def test_observation_feature_labels_scale_with_goal_count():
+    env = TeamNavigationEnv(
+        width=8,
+        height=10,
+        n_agents=3,
+    )
+    try:
+        labels = env._observation_feature_labels(42)
+        assert len(labels) == 42
+        assert labels[:3] == [
+            "agent_x",
+            "agent_y",
+            "delay",
+        ]
+        assert labels[3:9] == [
+            "g0_x",
+            "g0_y",
+            "g1_x",
+            "g1_y",
+            "g2_x",
+            "g2_y",
+        ]
+        assert env._observation_feature_source_indices(42)[:3] == [
+            0,
+            1,
+            41,
+        ]
+        assert env._observation_feature_source_indices(42)[3:] == list(range(2, 41))
+        assert env._format_observation_feature_value(2, 0.0, 42, "delay") == "OFF"
+        assert env._format_observation_feature_value(2, 1.0, 42, "delay") == "ON"
+        assert env._format_observation_feature_value(
+            0, 0.5, 42, "agent_x"
+        ) == str(int(round(0.5 * env._coordinate_scale[0])))
+        assert env._format_observation_feature_value(
+            3, 0.5, 42, "g0_x"
+        ) == str(int(round(0.5 * env._coordinate_scale[0])))
+    finally:
+        env.close()
 
 
 def test_successor_reset_uses_learned_spawn_distribution():
@@ -328,6 +464,7 @@ def test_project_mdp_supports_branching_and_merging_transitions():
         transitions=[(0, 1), (0, 2), (1, 3), (2, 3)],
         initial_state=0,
         goal_states=[3],
+        add_post_goal_state=False,
     )
 
     assert (0, (1, 0)) in mdp.successor_map

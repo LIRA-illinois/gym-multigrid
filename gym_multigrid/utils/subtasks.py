@@ -92,6 +92,7 @@ class NavigationTaskData:
     init_state_dist: PositionDist | None
     task_id: str | None = None
     goal_assignment: Literal["per_agent", "one_to_one"] = "per_agent"
+    goal_position_options_by_agent: tuple[tuple[Position, ...], ...] = ()
 
     @property
     def state(self) -> int:
@@ -112,6 +113,17 @@ class NavigationTaskData:
 
         if self.init_state_dist is not None and len(self.init_state_dist.states) == 0:
             raise ValueError("A navigation task must define spawn positions.")
+
+    @property
+    def has_multiple_goal_options(self) -> bool:
+        """Whether at least one agent has more than one assigned goal option."""
+        return bool(
+            self.goal_position_options_by_agent
+            and any(
+                len(options) > 1
+                for options in self.goal_position_options_by_agent
+            )
+        )
 
 
 class NavigationTaskCatalog:
@@ -146,7 +158,26 @@ class NavigationTaskCatalog:
                             f"{predecessor.from_state}->{predecessor.to_state}."
                         )
                     continue
-
+                if predecessor.has_multiple_goal_options:
+                    valid_successor_states = all(
+                        len(state) == len(predecessor.goal_position_options_by_agent)
+                        and all(
+                            position in predecessor.goal_position_options_by_agent[
+                                agent_index
+                            ]
+                            for agent_index, position in enumerate(state)
+                        )
+                        for state in successor.init_state_dist.states
+                    )
+                    if not valid_successor_states:
+                        raise ValueError(
+                            "Successor navigation task "
+                            f"{successor.from_state}->{successor.to_state} must "
+                            "start from per-agent options of the predecessor "
+                            "task's goal positions: "
+                            f"{predecessor.from_state}->{predecessor.to_state}."
+                        )
+                    continue
                 expected_states = (predecessor.goal_positions,)
                 expected_probs = (1.0,)
                 if successor.init_state_dist.states != expected_states or (
@@ -182,9 +213,32 @@ class NavigationTaskCatalog:
             from_state = int(
                 config["from_state"] if "from_state" in config else to_state
             )
-            goal_positions = tuple(
-                tuple(position) for position in config["goal_positions"]
+            raw_goal_positions = config["goal_positions"]
+            nested_goal_positions = bool(
+                raw_goal_positions
+                and isinstance(raw_goal_positions[0], (list, tuple))
+                and any(
+                    isinstance(value, (list, tuple))
+                    for value in raw_goal_positions[0]
+                )
             )
+            if nested_goal_positions:
+                goal_position_options_by_agent = tuple(
+                    tuple(tuple(position) for position in agent_options)
+                    for agent_options in raw_goal_positions
+                )
+                goal_positions = tuple(dict.fromkeys(
+                    position
+                    for agent_options in goal_position_options_by_agent
+                    for position in agent_options
+                ))
+            else:
+                goal_positions = tuple(
+                    tuple(position) for position in raw_goal_positions
+                )
+                goal_position_options_by_agent = tuple(
+                    (position,) for position in goal_positions
+                )
             spawn_config = config.get("init_state_dist")
             spawn_states = ()
             if spawn_config is None:
@@ -205,8 +259,21 @@ class NavigationTaskCatalog:
                 init_state_dist=init_state_dist,
                 task_id=config.get("id"),
                 goal_assignment=config.get("goal_assignment", "per_agent"),
+                goal_position_options_by_agent=goal_position_options_by_agent,
             )
-            if len(goal_positions) != num_agents:
+            if nested_goal_positions:
+                if len(goal_position_options_by_agent) != num_agents:
+                    raise ValueError(
+                        f"Navigation task {from_state}->{to_state} must define "
+                        "one goal-position option list per agent."
+                    )
+                for agent_options in goal_position_options_by_agent:
+                    if len(agent_options) == 0:
+                        raise ValueError(
+                            f"Navigation task {from_state}->{to_state} must define "
+                            "at least one goal position per agent."
+                        )
+            elif len(goal_positions) != num_agents:
                 raise ValueError(
                     f"Navigation task {from_state}->{to_state} must define exactly "
                     "one goal position per agent."
@@ -215,9 +282,14 @@ class NavigationTaskCatalog:
                 raise ValueError(
                     f"Navigation task {from_state}->{to_state} must define one spawn per agent."
                 )
-            for position in goal_positions + tuple(
+            validation_positions = goal_positions + tuple(
+                position
+                for agent_options in goal_position_options_by_agent
+                for position in agent_options
+            ) + tuple(
                 position for joint_state in spawn_states for position in joint_state
-            ):
+            )
+            for position in validation_positions:
                 x, y = position
                 if not (0 <= x < width and 0 <= y < height):
                     raise ValueError(
